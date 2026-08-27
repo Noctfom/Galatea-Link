@@ -1,0 +1,19 @@
+# config.yaml
+server:
+  host: "127.0.0.1"
+  port: 7911
+  password: ""
+
+agent:
+  name: "Galatea_AI"
+  deck: "神秘白龙"
+  prefer_second: false       # true 为后手，false 为先手
+  
+model:
+  device: "cpu"              # 未来如果要上服务器可以改成 "cuda"
+  weights_path: "./models/galatea_iter_110.pth"
+  config:
+    d_model: 512
+    n_heads: 8
+    n_layers: 6
+    vocab_size: 20000

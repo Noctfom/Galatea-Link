@@ -1,0 +1,1205 @@
+'''
+gamestate模块
+用于维护和更新决斗状态，并生成全息数据快照
+'''
+
+import struct
+import io
+import traceback 
+import json
+import os
+from game_constants import LocationInfo, Zone, Phases
+from collections import defaultdict
+from card_reader import card_db
+from data_types import GameSnapshot, GlobalFeature, CardEntity, GameAction
+
+_META_STAPLES = None
+
+class MessageParser:
+    # 基于源码的精确长度定义 (Payload长度)
+    # -1: 变长消息，进入 calculate_dynamic_length
+    MSG_LEN = {
+        0:-1, 1: 0, 2: 6, 3: 0, 4: 0, 5: 2, 
+        
+        # --- 交互类 ---
+        10: -1, 11: -1, 12: 13, 13: 5, 14: -1, 15: -1, 16: -1, 
+        18: 6,  # PLACE (1+1+4) [已验证]
+        19: 6, 20: -1, 22: -1, 23: -1, 
+        24: 6,  # DISFIELD (同18) [已验证]
+        25: -1, 26: -1, 
+        
+        # --- 确认/展示类 ---
+        30: -1, 31: -1, 32: 1, 33: -1, 34: -1, 
+        35: 1, # SWAP_GRAVE_DECK
+        36: -1, 37: 0, 38: 6, 39: -1,
+        
+        # --- 流程/数值 ---
+        40: 1, 41: 2, 42: -1,
+        
+        # --- 动作类 ---
+        50: 16, 53: 9, 54: 8, 55: 16, 56: 4, 
+        
+        # --- 召唤/连锁 ---
+        60: 8, 
+        61: 0, 63: 0, 65: 0, # SUMMONED [已验证 0字节]
+        62: 8, 64: 8, 
+        
+        70: 16, 
+        71: 1, 72: 1, 73: 1, # CHAINED [已验证 1字节]
+        74: 0, # CHAIN_END [已验证 0字节]
+        75: 1, 76: 1, # NEGATED [已验证 1字节]
+        
+        # --- 对象/指示物 ---
+        81: -1, 83: -1, # BECOME_TARGET [已验证 变长]
+        
+        # --- 伤害/数值 ---
+        90: -1, 91: 5, 92: 5, 93: 8, 94: 5, 
+        96: 8, 97: 8, # CARD_TARGET [已验证 4+4]
+        100: 5, # PAY_LPCOST [已验证 1+4]
+        101: 7, 102: 7, # COUNTER [已验证 2+1+1+1+2]
+        
+        # --- 战斗 ---
+        110: 8, 111: 26, 112: 0, 113: 0, 114: 0, 
+        
+        # --- 杂项 ---
+        120: 8,
+        130: -1, 131: -1, 132: 1, 133: 1,
+        140: 6, 141: 6, 142: -1, 
+        143: -1, # ANNOUNCE_NUMBER [已验证]
+        160: 9, 
+        161: -1, 162: -1, 
+        163: -1, 164: -1, # AI_NAME / SHOW_HINT [已验证 字符串]
+        165: 6, # PLAYER_HINT [已验证 1+1+4]
+        170: 4
+    }
+
+    @staticmethod
+    def calculate_dynamic_length(msg_type, stream):
+        start_pos = stream.tell()
+        length = 0
+        
+        try:
+            # 11: IDLECMD
+            if msg_type == 11: 
+                stream.read(1); length += 1 # P
+                for i in range(6): 
+                    b = stream.read(1); length += 1
+                    count = struct.unpack('B', b)[0]
+                    item_len = 11 if i == 5 else 7
+                    stream.read(count * item_len); length += count * item_len
+                stream.read(3); length += 3
+
+            # 10: BATTLECMD
+            elif msg_type == 10:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1
+                c = struct.unpack('B', b)[0]
+                stream.read(c * 11); length += c * 11
+                b = stream.read(1); length += 1
+                c = struct.unpack('B', b)[0]
+                stream.read(c * 8); length += c * 8
+                stream.read(2); length += 2
+
+            # 14: SELECT_OPTION 
+            elif msg_type == 14:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 4); length += count * 4
+
+            # 15/20: SELECT_CARD / TRIBUTE
+            elif msg_type in [15, 20]:
+                stream.read(4); length += 4 # P, Cancel, Min, Max
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 8); length += count * 8
+
+            # 16: SELECT_CHAIN
+            elif msg_type == 16:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                
+                # 修复 1：MDPro 砍掉了 Spe，头部只剩 Forced(1) + Hint1(4) + Hint2(4) = 9 字节
+                stream.read(9); length += 9 
+                
+                # 修复 2：移除定界符，严格按照 13 字节读取每个 Option
+                # 每个连锁选项包含：flag(1), code(4), loc(1), seq(1), pos(1), desc(4), effect_id(1) = 13 字节
+                stream.read(count * 13); length += count * 13
+
+            # 18/24: PLACE / DISFIELD
+            elif msg_type in [18, 24]:
+                stream.read(6); length = 6
+
+            # 21: SORT_CHAIN
+            elif msg_type == 21:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 22: SELECT_COUNTER
+            elif msg_type == 22:
+                stream.read(5); length += 5 # P, type(2), qty(2)
+                b = stream.read(1); length += 1 # Size
+                size = struct.unpack('B', b)[0]
+                stream.read(size * 9); length += size * 9
+
+            # 23: SELECT_SUM 
+            elif msg_type == 23:
+                stream.read(8); length += 8 # Header
+                b = stream.read(1); length += 1 # Must_count
+                must_c = struct.unpack('B', b)[0]
+                stream.read(must_c * 11); length += must_c * 11
+                b = stream.read(1); length += 1 # Sel_count
+                sel_c = struct.unpack('B', b)[0]
+                stream.read(sel_c * 11); length += sel_c * 11
+
+            # 25: SORT_CARD
+            elif msg_type == 25:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 26: SELECT_UNSELECT
+            elif msg_type == 26:
+                stream.read(5); length += 5 # Header 5 bytes
+                b = stream.read(1); length += 1 # Size_A
+                size_a = struct.unpack('B', b)[0]
+                stream.read(size_a * 8); length += size_a * 8
+                b = stream.read(1); length += 1 # Size_B
+                size_b = struct.unpack('B', b)[0]
+                stream.read(size_b * 8); length += size_b * 8
+
+            # 30/34/42: CONFIRM
+            elif msg_type in [30, 34, 42]:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 31: CONFIRM_CARDS
+            elif msg_type == 31:
+                stream.read(1); length += 1 # P
+                # [额外修复] 吞掉强制插入的未知幽灵字节
+                stream.read(1); length += 1 
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 36: SHUFFLE_SET_CARD
+            elif msg_type == 36:
+                stream.read(1); length += 1 # Loc
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 8); length += count * 8
+
+            # 33/39/81/90/142/143: 1P + 1Count + Count*4
+            elif msg_type in [33, 39, 81, 90, 142, 143]:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 4); length += count * 4
+
+            # 83: BECOME_TARGET
+            elif msg_type == 83:
+                b = stream.read(1); length += 1 # Count (无 P 字节)
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 4); length += count * 4
+
+            # 130/131: TOSS_COIN/DICE
+            elif msg_type in [130, 131]:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 1); length += count * 1
+
+            # 161: TAG_SWAP
+            elif msg_type == 161:
+                stream.read(1); length += 1 # P
+                b = stream.read(4); length += 4 # main, extra, extra_p, hand
+                _, extra_len, _, hand_len = struct.unpack('BBBB', b)
+                stream.read(4); length += 4 # Deck top
+                stream.read(hand_len * 4); length += hand_len * 4
+                stream.read(extra_len * 4); length += extra_len * 4
+
+            # 162: RELOAD_FIELD
+            elif msg_type == 162:
+                b = stream.read(1); length += 1
+                rule = struct.unpack('B', b)[0]
+                mzone_size = 7 if rule >= 4 else 5
+                for _ in range(2):
+                    stream.read(4); length += 4 
+                    for _ in range(mzone_size):
+                        b = stream.read(1); length += 1
+                        if struct.unpack('B', b)[0] != 0:
+                            stream.read(2); length += 2 
+                    for _ in range(8):
+                        b = stream.read(1); length += 1
+                        if struct.unpack('B', b)[0] != 0:
+                            stream.read(1); length += 1 
+                    stream.read(6); length += 6 
+                b = stream.read(1); length += 1
+                chain_size = struct.unpack('B', b)[0]
+                stream.read(chain_size * 15); length += chain_size * 15
+
+            # 163/164: STRING MESSAGES
+            elif msg_type in [163, 164]:
+                b = stream.read(2); length += 2
+                str_len = struct.unpack('H', b)[0]
+                stream.read(str_len + 1); length += str_len + 1
+
+            else:
+                stream.read()
+                length = stream.tell() - start_pos
+
+        except Exception as e:
+            print(f"calculate_dynamic_length解析失败: {e}")
+            stream.seek(start_pos)
+            return -1
+            
+        stream.seek(start_pos)
+        return length
+
+    @staticmethod
+    def parse(data):
+        msgs = []
+        stream = io.BytesIO(data)
+        data_len = len(data)
+        
+        # 1. 严格白名单 (移除 0)
+        VALID_MSGS = {
+            1, 2, 3, 4, 5, 
+            10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
+            30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+            40, 41, 42,
+            50, 53, 54, 55, 56, 
+            60, 61, 62, 63, 64, 65,
+            70, 71, 72, 73, 74, 75, 76, 
+            81, 83, 
+            90,
+            91, 92, 93, 94, 96, 97, 
+            100, 101, 102, 
+            110, 111, 112, 113, 114, 
+            120,
+            130, 131, 132, 133, 
+            140, 141, 142, 143, 
+            160, 163, 164, 165, 170
+        }
+        
+        # [探针] 记录最近 15 个成功解析的指令，看清乱码源头
+        recent_msgs = []
+
+        while stream.tell() < data_len:
+            start_pos = stream.tell()
+            b = stream.read(1)
+            if not b: break
+            msg_type = struct.unpack('B', b)[0]
+
+            # [异常拦截]
+            if msg_type not in VALID_MSGS:
+                print(f"\n👻 [Parser] 抓到幽灵: {msg_type} (Hex: {hex(msg_type)})!")
+                print(f"🔍 坠机前15个指令: {recent_msgs}")
+                
+                # 🌟 终极杀手锏：打印整个数据包的十六进制字节流
+                hex_dump = " ".join([f"{b:02X}" for b in data])
+                print(f"📦 完整数据包Hex (总长度 {data_len}):\n{hex_dump}")
+                
+                # 计算当前出错在第几个字节
+                error_pos = stream.tell() - 1
+                print(f"📍 错位发生位置: 字节 {error_pos}")
+                break
+
+            # [虚假胜利拦截]
+            if msg_type == 5:
+                if stream.tell() < data_len:
+                    wb = stream.read(1)
+                    winner = struct.unpack('B', wb)[0]
+                    
+                    reason = 0
+                    if stream.tell() < data_len:
+                        rb = stream.read(1)
+                        reason = struct.unpack('B', rb)[0]
+                        
+                    stream.seek(start_pos + 1)
+                    
+                    if winner > 2 or reason > 0x30: 
+                        print(f"\n🛡️ [gamestate][Parser] 拦截到残存胜利! \n🔍 坠机前15个指令: {recent_msgs}")
+                        break 
+
+            # 计算长度
+            length = MessageParser.MSG_LEN.get(msg_type, -1)
+            
+            if length == -1:
+                try:
+                    length = MessageParser.calculate_dynamic_length(msg_type, stream)
+                except Exception as e:
+                    print(f"\n👻 [gamestate][Parser] 变长解析崩溃 (msg: {msg_type})! \n🔍 坠机前15个指令: {recent_msgs}")
+                    break
+            
+            if length >= 0:
+                if stream.tell() + length > data_len: break 
+                payload = stream.read(length)
+                msgs.append(bytes([msg_type]) + payload)
+                
+                # [探针记录] 保留 15 个
+                recent_msgs.append(msg_type)
+                if len(recent_msgs) > 15:
+                    recent_msgs.pop(0)
+            else:
+                break
+                
+        return msgs
+    
+# ==================================================================================
+#  DuelState V2.1 - 包含动作解析
+# ==================================================================================
+
+class DuelState:
+    # [新增参数] 传入初始的主卡组和额外卡组
+    def __init__(self, p0_main=None, p0_extra=None, p1_main=None, p1_extra=None):
+        self.entities = {}
+        self.current_valid_actions = []
+        self.turn_player = 0
+        
+        # 初始化双边记牌器
+        self.p0_deck = list(p0_main) if p0_main else []
+        self.p0_extra = list(p0_extra) if p0_extra else []
+        self.p1_deck = list(p1_main) if p1_main else []
+        self.p1_extra = list(p1_extra) if p1_extra else []
+        
+        # 初始化基础状态
+        self.turn = 0
+        self.phase = 0
+        self.my_lp = 8000
+        self.op_lp = 8000
+        self.active_player = 0
+        self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
+
+        self.chain_stack = []
+        self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []} 
+        self.recently_confirmed = []
+
+    def reset(self):
+        self.turn = 0
+        self.phase = 0
+        self.my_lp = 8000
+        self.op_lp = 8000
+        self.active_player = 0
+        self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
+        
+        # 当前挂起的合法动作列表
+        # 每次收到交互消息 (IDLE, CHAIN, CARD...) 时更新
+        self.current_valid_actions = [] 
+
+        self.chain_stack = []
+        self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []} 
+        self.recently_confirmed = []
+
+    def update(self, msg_type, msg_payload):
+        """解析消息，更新状态 + 解析合法动作"""
+        try:
+            stream = io.BytesIO(msg_payload)
+            
+            # --- 状态维护 ---
+            if msg_type in [30, 31, 42]:
+                stream.read(1) # P
+                if msg_type == 31: stream.read(1) #未知幽灵字节
+                count = struct.unpack('B', stream.read(1))[0]
+                for _ in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    stream.read(3) # c, l, s
+                    self.recently_confirmed.append(code & 0x7FFFFFFF)
+
+            elif msg_type == 50: # MSG_MOVE (完美兼容超量素材)
+                code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
+                old_c, old_l, old_s, old_pos = LocationInfo.decode(old_raw)
+                new_c, new_l, new_s, new_pos = LocationInfo.decode(new_raw)
+                pure_code = code & 0x7FFFFFFF
+
+                # ========================================================
+                # 状态记忆池：只进不出（除非明牌被打出）
+                # ========================================================
+                is_public_move = False
+                if (old_l & 0x7F) == Zone.GRAVE: is_public_move = True
+                elif (old_l & 0x7F) in [Zone.MZONE, Zone.SZONE, Zone.REMOVED] and (old_pos & 0x1 or old_pos & 0x4): is_public_move = True
+                elif pure_code in self.recently_confirmed:
+                    is_public_move = True
+                    self.recently_confirmed.remove(pure_code)
+
+                # 进池：明牌入库 (比如检索)
+                if new_l == Zone.HAND and new_c in [0, 1] and is_public_move and pure_code != 0:
+                    self.known_hand_codes[new_c].append(pure_code)
+
+                # 出池：必须满足是从【手牌】离开，或者从【场上的暗牌/里侧表示】暴露真实身份离开
+                is_from_hidden = (old_l == Zone.HAND) or (old_l in [Zone.MZONE, Zone.SZONE] and not (old_pos & 0x1 or old_pos & 0x4))
+                
+                if pure_code != 0 and old_c in [0, 1] and is_from_hidden:
+                    if pure_code in self.known_hand_codes[old_c]:
+                        self.known_hand_codes[old_c].remove(pure_code)
+                # ========================================================
+
+                # --- 1. 处理脱离旧位置 ---
+                if old_l & 0x80: # 从超量素材区拔除
+                    host_l = old_l & ~0x80
+                    if old_c in [0, 1] and host_l != 0 and old_s in self.field_map[old_c][host_l]:
+                        host = self.field_map[old_c][host_l][old_s]
+                        if 'overlays' in host and len(host['overlays']) > old_pos:
+                            host['overlays'].pop(old_pos) # 拔除指定层的素材
+                elif old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
+                    del self.field_map[old_c][old_l][old_s] # 正常离场
+
+                # --- 2. 处理进入新位置 ---
+                if new_l & 0x80: # 塞入超量素材区 (底下的黑洞)
+                    host_l = new_l & ~0x80
+                    if new_c in [0, 1] and host_l != 0 and new_s in self.field_map[new_c][host_l]:
+                        host = self.field_map[new_c][host_l][new_s]
+                        if 'overlays' not in host: host['overlays'] = []
+                        host['overlays'].insert(new_pos, pure_code) # new_pos 被 C++ 挪用成了素材排序号
+                elif new_c in [0, 1] and new_l != 0:
+                    self.field_map[new_c][new_l][new_s] = {
+                        'code': code, 'pos': new_pos, 'owner': new_c,
+                        'counters': 0, 'overlays': [], 'is_equipped': False # 附带三大盲区容器
+                    }
+
+                # [上帝视角记牌器] 跟踪卡片进出卡组/额外
+                # 剥离可能存在的异画/密码掩码，还原真实卡密
+                pure_code = code & 0x7FFFFFFF
+                if pure_code != 0:
+                    # --- 主卡组变动 ---
+                    if old_l == Zone.DECK and new_l != Zone.DECK:
+                        target_deck = self.p0_deck if old_c == 0 else self.p1_deck
+                        if pure_code in target_deck: target_deck.remove(pure_code)
+                    elif new_l == Zone.DECK and old_l != Zone.DECK:
+                        target_deck = self.p0_deck if new_c == 0 else self.p1_deck
+                        target_deck.append(pure_code)
+                    
+                    # --- 额外卡组变动 ---
+                    if old_l == Zone.EXTRA and new_l != Zone.EXTRA:
+                        target_extra = self.p0_extra if old_c == 0 else self.p1_extra
+                        if pure_code in target_extra: target_extra.remove(pure_code)
+                    elif new_l == Zone.EXTRA and old_l != Zone.EXTRA:
+                        target_extra = self.p0_extra if new_c == 0 else self.p1_extra
+                        target_extra.append(pure_code)
+
+            elif msg_type == 53: # POS_CHANGE
+                code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
+                if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
+                pure_code = code & 0x7FFFFFFF
+                if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
+                    if pure_code in self.known_hand_codes[c]:
+                        self.known_hand_codes[c].remove(pure_code)
+
+            elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
+                code = struct.unpack('<I', stream.read(4))[0]
+                info_loc = struct.unpack('<I', stream.read(4))[0] # 卡片当前位置
+                tc = struct.unpack('B', stream.read(1))[0]      # 触发控制者
+                tl = struct.unpack('B', stream.read(1))[0]      # 触发区域
+                ts = struct.unpack('B', stream.read(1))[0]      # 触发编号
+                desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
+                ct = struct.unpack('B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
+                
+                # 压入堆栈记事本
+                self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
+                # 压入历史记事本 (最近发生的在最前面)
+                self.history_stack.insert(0, {'code': code})
+                # 保持记忆容量为 8
+                if len(self.history_stack) > 8:
+                    self.history_stack.pop()
+
+                # 出池：如果卡片直接在手牌或盖伏状态发效果（翻开），也会暴露 code
+                pure_code = code & 0x7FFFFFFF
+                if pure_code in self.known_hand_codes[tc]:
+                    self.known_hand_codes[tc].remove(pure_code)
+
+            elif msg_type == 74: # MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
+                self.chain_stack.clear()
+
+            elif msg_type == 90: # DRAW (抽卡)
+                #  [录像修复 B] 记录抽卡到手牌！
+                p = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('B', stream.read(1))[0]
+                for _ in range(count):
+                    raw_code = struct.unpack('<I', stream.read(4))[0]
+                    code = raw_code & 0x7FFFFFFF
+                    seq = 0
+                    while seq in self.field_map[p][Zone.HAND]: seq += 1
+                    self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p, 'counters': 0, 'overlays': [], 'is_equipped': False}
+                    
+                    # [上帝视角记牌器] 抽卡等同于离开主卡组
+                    pure_code = code & 0x7FFFFFFF
+                    target_deck = self.p0_deck if p == 0 else self.p1_deck
+                    if pure_code in target_deck:
+                        target_deck.remove(pure_code)
+
+            elif msg_type in [91, 92, 94]: # 伤害 / 回复 / LP直接更新
+                # [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
+                p, val = struct.unpack('<BI', stream.read(5))
+                if p == 0:
+                    if msg_type == 91: self.my_lp = max(0, self.my_lp - val)
+                    elif msg_type == 92: self.my_lp += val
+                    else: self.my_lp = val
+                else:
+                    if msg_type == 91: self.op_lp = max(0, self.op_lp - val)
+                    elif msg_type == 92: self.op_lp += val
+                    else: self.op_lp = val
+
+            elif msg_type == 94: # LP
+                p, lp = struct.unpack('<BI', stream.read(5))
+                if p == 0: self.my_lp = lp
+                else: self.op_lp = lp
+
+            # [新增] 指示物雷达 (101: 加, 102: 减)
+            elif msg_type == 101: 
+                ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                if c in [0,1] and s in self.field_map[c].get(l, {}):
+                    self.field_map[c][l][s]['counters'] = self.field_map[c][l][s].get('counters', 0) + count
+
+            elif msg_type == 102: 
+                ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                if c in [0,1] and s in self.field_map[c].get(l, {}):
+                    self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
+                    
+            # [修正] 真正的装备雷达 MSG_EQUIP (93)
+            elif msg_type == 93: 
+                equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
+                tgt_raw = struct.unpack('<I', stream.read(4))[0]   # 被装备怪兽的位置
+                tc, tl, ts, _ = LocationInfo.decode(tgt_raw)
+                if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
+                    self.field_map[tc][tl][ts]['is_equipped'] = True
+            
+            elif msg_type == 40: self.turn += 1
+            elif msg_type == 41: self.phase = struct.unpack('H', stream.read(2))[0]
+
+            # --- [新增] 动作空间解析 (Action Parsing) ---
+            # 如果是交互消息，解析出 valid_actions
+            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
+                self.active_player = struct.unpack('B', msg_payload[0:1])[0]
+                self._parse_valid_actions(msg_type, stream)
+            # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
+            # 否则重演时无法用上一次的选项去验证人类的修正点击
+            elif msg_type != 1: 
+                self.current_valid_actions = []
+
+        except Exception as e:
+            print(f"⚠️ [GameState] update消息解析失败: {e}")
+            # 抛出异常，击毙这局烂尾游戏
+            raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+
+    def _parse_valid_actions(self, msg_type, stream):
+        """
+        解析交互消息，生成 GameAction 列表
+        """
+        self.current_valid_actions = []
+        stream.seek(0)
+        
+        try:
+            # 1. MSG_SELECT_IDLECMD (11)
+            if msg_type == 11:
+                # 尝试读取 Player，读不到就直接退出
+                b = stream.read(1)
+                if not b: return 
+                
+                action_types = [0, 1, 2, 3, 4, 5]
+                
+                for at in action_types:
+                    b = stream.read(1)
+                    if not b: break # <--- [修改] 读不到就停，别报错
+                    count = struct.unpack('B', b)[0]
+                    
+                    need_bytes = 11 if at == 5 else 7
+                    for i in range(count):
+                        # 预读检查
+                        raw_bytes = stream.read(need_bytes)
+                        if len(raw_bytes) < need_bytes: break # <--- [修改] 数据不够也停
+                        
+                        # 手动解包
+                        if at == 5:
+                            code = struct.unpack('<I', raw_bytes[0:4])[0]
+                            c = struct.unpack('B', raw_bytes[4:5])[0]
+                            l = struct.unpack('B', raw_bytes[5:6])[0]
+                            s = struct.unpack('B', raw_bytes[6:7])[0]
+                            desc = struct.unpack('<I', raw_bytes[7:11])[0]
+                        else:
+                            code = struct.unpack('<I', raw_bytes[0:4])[0]
+                            c = struct.unpack('B', raw_bytes[4:5])[0]
+                            l = struct.unpack('B', raw_bytes[5:6])[0]
+                            s = struct.unpack('B', raw_bytes[6:7])[0]
+                            desc = 0
+                        
+                        loc_raw = LocationInfo.encode(c, l, s, 0)
+                        self.current_valid_actions.append(
+                            GameAction(action_type=at, index=i, target_entity_idx=loc_raw, desc_id=desc)
+                        )
+                
+                # Phase Buttons (尝试读取)
+                # 能读几个是几个，绝对不报错
+                bp = 0; ep = 0
+                b = stream.read(1)
+                if b: bp = struct.unpack('B', b)[0]
+                
+                b = stream.read(1)
+                if b: ep = struct.unpack('B', b)[0]
+                
+                # shuf 读不读无所谓
+                
+                if bp: self.current_valid_actions.append(GameAction(action_type=6, index=0, desc_str="To BP"))
+                if ep: self.current_valid_actions.append(GameAction(action_type=7, index=0, desc_str="To EP"))
+
+            # 2. MSG_SELECT_CHAIN (16)
+            elif msg_type == 16:
+                player = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('B', stream.read(1))[0]
+                forced = struct.unpack('B', stream.read(1))[0]
+                stream.read(8) # 跳过 hint1 (4), hint2 (4)
+                
+                for i in range(count):
+                        
+                    stream.read(1) # Flag
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    desc = struct.unpack('<I', stream.read(4))[0]
+                    
+                    act = GameAction(action_type=16, index=i, target_entity_idx=loc_val, desc_id=desc, desc_str=f"Chain {code}")
+                    act.code = code 
+                    self.current_valid_actions.append(act)
+                    
+                # 只有非强制发动 (forced == 0) 时，才允许 AI 取消
+                if not forced:
+                    self.current_valid_actions.append(GameAction(action_type=16, index=-1, desc_str="Cancel"))
+                
+                return True
+
+            # 3. MSG_SELECT_CARD (15)
+            # 结构: P + Cancelable + Min + Max + Count + List(Code4+Loc4)
+            elif msg_type == 15:
+                stream.read(1) # P
+                can_cancel = struct.unpack('B', stream.read(1))[0]
+                stream.read(2) # Min, Max
+                count = struct.unpack('B', stream.read(1))[0]
+                
+                for i in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    
+                    act = GameAction(action_type=15, index=i, target_entity_idx=loc_val, desc_str=f"Select {code}")
+                    act.code = code
+                    self.current_valid_actions.append(act)
+                
+                if can_cancel or count == 0:
+                    self.current_valid_actions.append(GameAction(action_type=15, index=-1, desc_str="Cancel"))
+            
+            # 4. MSG_SELECT_BATTLECMD (10)
+            elif msg_type == 10:
+                stream.read(1) # Player
+                
+                # --- A. Activatable (发动效果) ---
+                # C++: write_buffer8(core.select_chains.size())
+                count = struct.unpack('B', stream.read(1))[0]
+                
+                for i in range(count):
+                    # C++ 结构 (11 字节): 
+                    # Code(4) + Controler(1) + Location(1) + Sequence(1) + Desc(4)
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    c = struct.unpack('B', stream.read(1))[0]
+                    l = struct.unpack('B', stream.read(1))[0]
+                    s = struct.unpack('B', stream.read(1))[0]
+                    desc = struct.unpack('<I', stream.read(4))[0]
+                    
+                    # 编码位置 -> Entity ID
+                    loc_raw = LocationInfo.encode(c, l, s, 0)
+                    
+                    # [修正] action_type 必须是 0 (C++ t=0)
+                    self.current_valid_actions.append(
+                        GameAction(action_type=0, index=i, target_entity_idx=loc_raw, desc_id=desc)
+                    )
+
+                # --- B. Attackable (攻击宣言) ---
+                # C++: write_buffer8(core.attackable_cards.size())
+                count_atk = struct.unpack('B', stream.read(1))[0]
+                
+                for i in range(count_atk):
+                    # C++ 结构 (8 字节):
+                    # Code(4) + Controler(1) + Location(1) + Sequence(1) + Direct(1)
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    c = struct.unpack('B', stream.read(1))[0]
+                    l = struct.unpack('B', stream.read(1))[0]
+                    s = struct.unpack('B', stream.read(1))[0]
+                    direct = struct.unpack('B', stream.read(1))[0]
+                    
+                    # 编码位置 -> Entity ID
+                    loc_raw = LocationInfo.encode(c, l, s, 0)
+                    
+                    # [修正] action_type 必须是 1 (C++ t=1)
+                    desc_str = "Direct Attack" if direct else f"Attack {code}"
+                    self.current_valid_actions.append(
+                        GameAction(action_type=1, index=i, target_entity_idx=loc_raw, desc_str=desc_str)
+                    )
+
+                # --- C. Phase Transition ---
+                m2 = struct.unpack('B', stream.read(1))[0]
+                ep = struct.unpack('B', stream.read(1))[0]
+                
+                # [修正] M2=2, EP=3 (C++ t=2, t=3)
+                if m2: self.current_valid_actions.append(GameAction(action_type=2, index=0, desc_str="To M2"))
+                if ep: self.current_valid_actions.append(GameAction(action_type=3, index=0, desc_str="To EP"))
+
+            # 5. MSG_SELECT_YESNO (13) / EFFECTYN (12)
+            elif msg_type == 12:
+                # [C++源码证实] 有卡片实体
+                # 结构: P(1) + Code(4) + C(1) + L(1) + S(1) + Desc(4)
+                stream.read(1) # P
+                code = struct.unpack('<I', stream.read(4))[0]
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                desc = struct.unpack('<I', stream.read(4))[0]
+                
+                # 关键：绑定卡片位置,让 AI 知道是哪张卡在问
+                loc_raw = LocationInfo.encode(c, l, s, 0)
+                
+                # Index 1=Yes, 0=No
+                self.current_valid_actions.append(
+                    GameAction(action_type=msg_type, index=1, target_entity_idx=loc_raw, desc_id=desc, desc_str="Yes")
+                )
+                self.current_valid_actions.append(
+                    GameAction(action_type=msg_type, index=0, target_entity_idx=loc_raw, desc_id=desc, desc_str="No")
+                )
+
+            elif msg_type == 13:
+                # [C++源码证实] 无卡片实体，通用询问
+                # 结构: P(1) + Desc(4)
+                stream.read(1)
+                desc = struct.unpack('<I', stream.read(4))[0]
+                # target_entity_idx = -1
+                self.current_valid_actions.append(GameAction(action_type=msg_type, index=1, desc_id=desc, desc_str="Yes"))
+                self.current_valid_actions.append(GameAction(action_type=msg_type, index=0, desc_id=desc, desc_str="No"))
+
+            # 6. MSG_SELECT_OPTION (14)
+            elif msg_type == 14:
+                stream.read(1) # P
+                count = struct.unpack('B', stream.read(1))[0]
+                for i in range(count):
+                    self.current_valid_actions.append(GameAction(action_type=14, index=i, desc_str=f"Option {i}"))
+
+            # 7. MSG_SELECT_POSITION (19)
+            elif msg_type == 19:
+                stream.read(5) # P + Code
+                mask = struct.unpack('B', stream.read(1))[0]
+                # 0x1:ATK, 0x2:ATK_down(N/A), 0x4:DEF, 0x8:DEF_down
+                if mask & 0x1: self.current_valid_actions.append(GameAction(action_type=19, index=1, desc_str="ATK"))
+                if mask & 0x2: self.current_valid_actions.append(GameAction(action_type=19, index=2, desc_str="ATK_Down"))
+                if mask & 0x4: self.current_valid_actions.append(GameAction(action_type=19, index=4, desc_str="DEF"))
+                if mask & 0x8: self.current_valid_actions.append(GameAction(action_type=19, index=8, desc_str="Set"))
+
+            # 8. MSG_SELECT_PLACE (18) / DISFIELD (24) - [攻克难点！]
+            elif msg_type in [18, 24]:
+                stream.read(1); count = struct.unpack('B', stream.read(1))[0]
+                mask = struct.unpack('<I', stream.read(4))[0]
+                for i in range(32):
+                    if not (mask & (1 << i)):
+                        self.current_valid_actions.append(GameAction(
+                            action_type=msg_type, 
+                            index=i,  # 🌟 修复：直接传 i，千万别传 1<<i
+                            desc_id=i, desc_str=f"Place Grid {i}"
+                        ))
+            
+            # 9. MSG_SELECT_UNSELECT (26)
+            elif msg_type == 26:
+                stream.read(1) # P
+                finishable = struct.unpack('B', stream.read(1))[0]
+                cancelable = struct.unpack('B', stream.read(1))[0]
+                stream.read(2) # min, max
+                
+                # 可选卡片 (Select)
+                count_sel = struct.unpack('B', stream.read(1))[0]
+                for i in range(count_sel):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    self.current_valid_actions.append(GameAction(action_type=26, index=i, target_entity_idx=loc_val, desc_str="Select"))
+                
+                # 可取消卡片 (Unselect)
+                count_unsel = struct.unpack('B', stream.read(1))[0]
+                for i in range(count_unsel):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    # 给 unselect 的 index 加上偏移量，方便动作翻译时区分
+                    self.current_valid_actions.append(GameAction(action_type=26, index=i + count_sel, target_entity_idx=loc_val, desc_str="Unselect"))
+                
+                if finishable:
+                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Finish"))
+                elif cancelable:
+                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Cancel"))
+
+            # =================================================================
+            # [阶段一追加] 9. 宣言类消息解析
+            # =================================================================
+            elif msg_type in [140, 141, 142, 143]:
+                stream.read(1) # P
+                count = struct.unpack('B', stream.read(1))[0]
+                
+                # 种族 (140) / 属性 (141)
+                if msg_type in [140, 141]:
+                    mask = struct.unpack('<I', stream.read(4))[0]
+                    for i in range(32):
+                        bit = 1 << i
+                        if mask & bit:
+                            self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=bit, desc_str=f"Announce Bit {i}"))
+                
+                # 卡名 (142) / 数字 (143)
+                elif msg_type == 142: # 卡名宣言：启动微型 RPN 虚拟机
+                    
+                    # 1. 获取引擎发来的 Opcodes (逆波兰表达式)
+                    opcodes = []
+                    for _ in range(count):
+                        buf = stream.read(4)
+                        if len(buf) < 4: break # 防御性编程
+                        opcodes.append(struct.unpack('<I', buf)[0])
+                    
+                    unique_codes = set()
+                    
+                    def add_valid_code(raw_code):
+                        pure_code = raw_code & 0x0FFFFFFF
+                        if pure_code > 10000: # 屏蔽乱码/Token
+                            try:
+                                card_db.get_full_stats(pure_code) # 数据库自检
+                                unique_codes.add(pure_code)
+                            except Exception:
+                                pass
+                    
+                    # 有些卡会把真实卡密直接作为参数发过来！
+                    for op in opcodes:
+                        if 10000 < op < 0x40000000: 
+                            add_valid_code(op)
+
+                    # 2. 收集自身卡组与公开情报
+                    my_cards = (self.p0_deck + self.p0_extra) if self.active_player == 0 else (self.p1_deck + self.p1_extra)
+                    for c in my_cards: add_valid_code(c)
+                        
+                    for p in [0, 1]:
+                        for code in self.known_hand_codes[p]: add_valid_code(code)
+                        for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA]:
+                            for seq, info in self.field_map[p].get(loc, {}).items():
+                                code = info.get('code', 0)
+                                pos = info.get('pos', 0)
+                                is_public = (pos & 0x1 or pos & 0x4)
+                                if p != self.active_player and not is_public and loc not in [Zone.GRAVE, Zone.REMOVED]:
+                                    continue
+                                if code != 0: add_valid_code(code)
+
+                    # 3. 常识字典缓存
+                    global _META_STAPLES
+                    if _META_STAPLES is None:
+                        try:
+                            staples_path = os.path.join(os.path.dirname(__file__), 'meta_staples.json')
+                            with open(staples_path, 'r') as f: _META_STAPLES = json.load(f)
+                        except Exception:
+                            _META_STAPLES = [14558127, 23434538, 10045474, 24094653, 73642296, 32807846]
+                    for c in _META_STAPLES: add_valid_code(c)
+                    
+                    if not unique_codes: unique_codes = {14558127, 23434538}
+
+                    # 微型 RPN 逆波兰计算器 (严格 C++ 协议版)
+                    def evaluate_rpn(code_to_test):
+                        if not opcodes: return True
+                        try:
+                            stats = card_db.get_full_stats(code_to_test)
+                            c_type = stats[0]; c_race = stats[1]; c_att = stats[2]
+                            c_level = stats[3]; c_link = stats[7]; c_setcodes = stats[10]
+                        except:
+                            return False
+                        
+                        stack = []
+                        for op in opcodes:
+                            if op < 0x40000000: # 参数压栈
+                                stack.append(op)
+                            else: # 执行操作
+                                if not stack: return False
+                                if op == 0x40000100: # ISCODE
+                                    stack.append(1 if code_to_test == stack.pop() else 0)
+                                elif op == 0x40000101: # ISSETCARD
+                                    v = stack.pop()
+                                    match = 0
+                                    settype = v & 0xfff
+                                    setsubtype = v & 0xf000
+                                    for sc in c_setcodes:
+                                        if (sc & 0xfff) == settype and (sc & 0xf000 & setsubtype) == setsubtype:
+                                            match = 1
+                                            break
+                                    stack.append(match)
+                                elif op == 0x40000102: # ISTYPE
+                                    val = stack.pop()
+                                    stack.append(1 if (c_type & val) == val else 0) # 严格位包含
+                                elif op == 0x40000103: # ISRACE
+                                    val = stack.pop()
+                                    stack.append(1 if (c_race & val) == val else 0)
+                                elif op == 0x40000104: # ISATTRIBUTE
+                                    val = stack.pop()
+                                    stack.append(1 if (c_att & val) == val else 0)
+                                elif op == 0x40000105: # ISLEVEL (补全等级判定)
+                                    stack.append(1 if c_level == stack.pop() else 0)
+                                elif op == 0x40000107: # ISLINK (补全连接判定)
+                                    stack.append(1 if c_link == stack.pop() else 0)
+                                elif op == 0x40000004: # AND
+                                    if len(stack) < 2: return False
+                                    v2 = stack.pop(); v1 = stack.pop()
+                                    stack.append(1 if (v1 and v2) else 0)
+                                elif op == 0x40000005: # OR
+                                    if len(stack) < 2: return False
+                                    v2 = stack.pop(); v1 = stack.pop()
+                                    stack.append(1 if (v1 or v2) else 0)
+                                elif op == 0x40000007: # NOT
+                                    stack.append(0 if stack.pop() else 1)
+                                else:
+                                    stack.append(0) # 兜底未知操作
+                                    print(f"⚠️ [RPN VM] 未知操作码 {hex(op)}，已自动忽略")
+                        return bool(stack[-1]) if stack else True # 必须返回 stack[-1] (栈顶)
+
+                    # 区分“纯白名单”和“RPN计算”
+                    def is_strictly_valid(c_test):
+                        if not opcodes: return True
+                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
+                        if not has_real_ops:
+                            # 只发来纯卡密列表的，必须且只能在列表内
+                            return c_test in opcodes
+                        return evaluate_rpn(c_test)
+
+                    # 批改返回卡池，只保留满足条件的选项
+                    def is_really_valid(c_test):
+                        if not opcodes: return True
+                        # 检查 opcodes 是否包含任何真正的 RPN 操作符
+                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
+                        if not has_real_ops:
+                            # 如果只是卡密列表（如抹杀指名者），必须在列表内才合法
+                            return c_test in opcodes
+                        # 否则走原本的虚拟机计算
+                        return evaluate_rpn(c_test)
+                    filtered_codes = [c for c in unique_codes if is_really_valid(c)]
+                    
+                    # 防御机制：如果 RPN 解析有瑕疵导致全灭，回退到全集交给 RuleBot 强行穷举
+                    if not filtered_codes: 
+                        print(f"🚨 RPN 解析后没有合法选项，回退到全集穷举,请检查 opcodes 是否合理: {opcodes}")
+                        filtered_codes = list(unique_codes)
+                    
+                    def get_priority_score(c):
+                        score = 0
+                        if c in my_cards: score += 100 # 自己卡组/额外里的卡最重要
+                        for p in [0, 1]:
+                            if c in self.known_hand_codes[p]: score += 50
+                            # 遍历所有区域，如果在场上/墓地/除外区出现过，权重提升
+                            for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED]:
+                                for info in self.field_map[p].get(loc, {}).values():
+                                    pure_c = info.get('code', 0) & 0x7FFFFFFF
+                                    if pure_c == c: score += 50
+                        if c in _META_STAPLES: score += 10 # 泛用手坑保底分
+                        return score
+
+                    # 按得分从高到低排序，得分相同按卡密排序
+                    filtered_codes.sort(key=lambda x: (-get_priority_score(x), x))
+                        
+                    self.announce_card_candidates = list(filtered_codes)
+                    
+                    # 此时，交给 AI 的选项将是 100% 完美的
+                    for i, code in enumerate(self.announce_card_candidates):
+                        self.current_valid_actions.append(GameAction(action_type=142, index=i, desc_id=code, desc_str=f"Announce_Blind_{code}"))
+                
+                elif msg_type == 143: # 数字宣言
+                    for i in range(count):
+                        buf = stream.read(4)
+                        if len(buf) < 4: break
+                        val = struct.unpack('<I', buf)[0]
+                        self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=val, desc_str=f"Announce Val {val}"))
+
+
+        except Exception as e:
+            print(f"❌ [gamestate][Parser Error] Failed to parse msg_type {msg_type}")
+            traceback.print_exc() # <--- 关键！打印完整堆栈
+            print(f"📦 Payload (Hex): {stream.getvalue().hex()}") # 打印原始数据
+            
+            raise RuntimeError(f"Failed to parse valid actions for msg_type {msg_type}: {e}")
+
+    def get_snapshot(self, env=None) -> GameSnapshot:
+        """
+        生成快照 + 填充 Actions
+        """
+
+        # 在生成快照前，执行绝对真理覆写
+        if env is not None:
+            self.sync_active_field(env)
+
+        def count_zone(p, loc): return len(self.field_map[p].get(loc, {}))
+        
+        global_feat = GlobalFeature(
+            turn_count=self.turn, phase_id=self.phase, to_play=self.active_player,
+            my_lp=self.my_lp, op_lp=self.op_lp,
+            my_hand_len=count_zone(0, Zone.HAND), op_hand_len=count_zone(1, Zone.HAND),
+            
+            # --- 修复：使用真实的列表长度，而不是通过 field_map 统计 ---
+            my_deck_len=len(self.p0_deck), op_deck_len=len(self.p1_deck),
+            
+            my_grave_len=count_zone(0, Zone.GRAVE), op_grave_len=count_zone(1, Zone.GRAVE),
+            my_removed_len=count_zone(0, Zone.REMOVED), op_removed_len=count_zone(1, Zone.REMOVED),
+            
+            # --- 修复：额外卡组同理 ---
+            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra)
+        )
+
+        entities = []
+        # 构建查找表: (p, l, s) -> entity_index
+        # 用于把 Action 里的 Loc 转换成 Entity Index
+        loc_to_idx_map = {} 
+        
+        idx_counter = 0
+        zones_order = [Zone.MZONE, Zone.SZONE, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA]
+        
+        for player in [0, 1]:
+            for zone in zones_order:
+                card_dict = self.field_map[player].get(zone, {})
+                sorted_seqs = sorted(card_dict.keys())
+                
+                for seq in sorted_seqs:
+                    info = card_dict[seq]
+                    code = info['code']
+                    pos = info['pos']
+                    # 🛡️ [防弹衣] 防止脏数据或衍生物(Token)导致崩溃
+                    try:
+                        stats = card_db.get_full_stats(code)
+                    except Exception:
+                        # 修复：必须是 11 个元素，且最后一个是 tuple
+                        stats = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (0, 0, 0, 0)]
+                    
+                    # 记录位置映射
+                    # LocationInfo: C | L<<8 | S<<16 | P<<24
+                    # 这里的 Key 我们做一个简化的 Hash
+                    loc_key = (player, zone, seq)
+                    loc_to_idx_map[loc_key] = idx_counter
+
+                    type_mask = stats[0]
+                    race = stats[1]
+                    attr = stats[2]
+                    level = stats[3]
+                    lscale = stats[4]
+                    rscale = stats[5]
+                    link_marker = stats[6]  # 直接从对齐好的数据库里拿，拒绝二次计算
+                    base_atk = stats[8]
+                    base_def = stats[9]
+                    setcodes = stats[10] # 接收字段集合
+
+                    # 提取引擎给出的实时属性，如果没有拿到，才用数据库基础数值兜底
+                    current_atk = info.get('current_atk', base_atk)
+                    current_def = info.get('current_def', base_def)
+
+                    # [新增] 动态突变属性的接管！
+                    type_mask = info.get('current_type', stats[0])
+                    race = info.get('current_race', stats[1])
+                    attr = info.get('current_attr', stats[2])
+                    level = info.get('current_level', stats[3])
+                    if level == 0: 
+                        level = stats[3]  # 防止超量/Link被 C++ 的 0 星覆写，强制回退取数据库静态星数
+
+                    counters = info.get('counters', 0)
+                    overlays = info.get('overlays', [])
+                    is_equipped = info.get('is_equipped', False)
+
+                    top_overlay_code = overlays[0] if len(overlays) > 0 else 0
+                    
+                    entities.append(CardEntity(
+                        code=code, owner=player, location=zone, sequence=seq, position=pos,
+                        current_atk=current_atk, current_def=current_def,
+                        type_mask=type_mask, race=race, attribute=attr, level=level,
+                        base_atk=base_atk, base_def=base_def,
+                        lscale=lscale, rscale=rscale, link_marker=link_marker, # 传入新参数
+                        setcodes=setcodes, # 写入实体
+                        is_public=(pos & 0x1 or pos & 0x4),
+                        counter_count=counters,
+                        overlay_count=len(overlays),
+                        is_equipped=is_equipped
+                    ))
+                    entities[-1].top_overlay_code = top_overlay_code
+                    idx_counter += 1
+
+        # --- [核心步骤] 匹配 Action 指针 ---
+        # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
+        final_actions = []
+        for act in self.current_valid_actions:
+            # 深拷贝一下，因为要修改
+            new_act = GameAction(act.action_type, act.index, act.target_entity_idx, act.desc_str)
+            
+            # 1. 继承基础标识 (用于宣言类和匹配)
+            if hasattr(act, 'desc_id'): new_act.desc_id = act.desc_id
+            if hasattr(act, 'code'): new_act.code = act.code
+            
+            # 2. 单目标指针映射 (绝对不能删！防止 GPU 越界 NaN 的核心)
+            if new_act.target_entity_idx > 0 and new_act.index != -1:
+                c, l, s, _ = LocationInfo.decode(new_act.target_entity_idx)
+                if (c, l, s) in loc_to_idx_map:
+                    new_act.target_entity_idx = loc_to_idx_map[(c, l, s)]
+                else:
+                    new_act.target_entity_idx = -1
+            else:
+                new_act.target_entity_idx = -1
+
+            # 3. 宏动作多重靶点映射及字节继承
+            if hasattr(act, 'macro_targets') and act.macro_targets:
+                setattr(new_act, 'macro_targets', [])
+                setattr(new_act, 'decision_bytes', act.decision_bytes) 
+                for m_loc in act.macro_targets:
+                    c, l, s, _ = LocationInfo.decode(m_loc)
+                    if (c, l, s) in loc_to_idx_map:
+                        new_act.macro_targets.append(loc_to_idx_map[(c, l, s)])
+                    else:
+                        new_act.macro_targets.append(-1)
+            
+            elif hasattr(act, 'macro_places') and act.macro_places:
+                setattr(new_act, 'macro_places', act.macro_places)
+                setattr(new_act, 'decision_bytes', act.decision_bytes)
+                
+            # 4. 兜底字节继承 (专门针对 Cancel 这类没有目标也没有格子的孤灵操作)
+            elif hasattr(act, 'decision_bytes'):
+                setattr(new_act, 'decision_bytes', act.decision_bytes)
+                
+            final_actions.append(new_act)
+
+        # 用一个临时变量接住
+        snap = GameSnapshot(
+            global_data=global_feat,
+            entities=entities,
+            valid_actions=final_actions,
+            p0_deck_codes=self.p0_deck.copy(),
+            p0_extra_codes=self.p0_extra.copy(),
+            p1_deck_codes=self.p1_deck.copy(), 
+            p1_extra_codes=self.p1_extra.copy() 
+        )
+        # 动态外挂连锁堆栈
+        snap.chain_stack = self.chain_stack.copy()
+        snap.history_stack = self.history_stack.copy()
+        snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
+        return snap
+    
+    def sync_active_field(self, env):
+     """直接从底层 C++ 内存覆写核心区域的状态"""
+     from game_constants import Zone
+     for p in [0, 1]:
+         # 清空原有的不靠谱记录
+         self.field_map[p][Zone.MZONE] = {}
+         self.field_map[p][Zone.SZONE] = {}
+         self.field_map[p][Zone.HAND] = {}
+
+         # 1. 绝对同步怪兽区 
+         for s in range(7):
+             res = env.query_card_state(p, Zone.MZONE, s)
+             if res: self.field_map[p][Zone.MZONE][s] = res # 直接赋值，因为已经是字典了
+
+         # 2. 绝对同步魔陷区 
+         for s in range(8):
+             res = env.query_card_state(p, Zone.SZONE, s)
+             if res: self.field_map[p][Zone.SZONE][s] = res
+
+         # 3. 绝对同步手牌
+         for s in range(30):
+             res = env.query_card_state(p, Zone.HAND, s)
+             if res: self.field_map[p][Zone.HAND][s] = res
+             else: break # 手牌是连续的，遇到空位就结束
