@@ -43,6 +43,11 @@ class LlmConfig:
     max_tokens: int = 512
     temperature: float = 0.1
     response_format: str = "json_object"
+    trace_requests: bool = True
+    thinking_mode: str = "auto"
+    cache_static_context: bool = True
+    cache_deck_text: bool = False
+    compact_dynamic_observation: bool = True
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class DecisionConfig:
     core_confidence_threshold: float = 0.65
     force_llm_message_types: tuple[int, ...] = ()
     include_core_suggestion: bool = True
+    llm_time_budget: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -151,6 +157,9 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
     response_format = str(llm_raw.get("response_format", "json_object"))
     if response_format not in {"json_object", "json_schema", "none"}:
         raise ValueError("配置项 llm.response_format 不受支持")
+    thinking_mode = str(llm_raw.get("thinking_mode", "auto"))
+    if thinking_mode not in {"auto", "enabled", "disabled"}:
+        raise ValueError("配置项 llm.thinking_mode 不受支持")
     llm = LlmConfig(
         enabled=_as_bool(llm_raw.get("enabled", False), "llm.enabled"),
         provider=str(llm_raw.get("provider", "openai_compatible")),
@@ -162,6 +171,23 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
         max_tokens=_as_int(llm_raw.get("max_tokens", 512), "llm.max_tokens"),
         temperature=float(llm_raw.get("temperature", 0.1)),
         response_format=response_format,
+        trace_requests=_as_bool(
+            llm_raw.get("trace_requests", True),
+            "llm.trace_requests",
+        ),
+        thinking_mode=thinking_mode,
+        cache_static_context=_as_bool(
+            llm_raw.get("cache_static_context", True),
+            "llm.cache_static_context",
+        ),
+        cache_deck_text=_as_bool(
+            llm_raw.get("cache_deck_text", False),
+            "llm.cache_deck_text",
+        ),
+        compact_dynamic_observation=_as_bool(
+            llm_raw.get("compact_dynamic_observation", True),
+            "llm.compact_dynamic_observation",
+        ),
     )
     decision_mode = str(decision_raw.get("mode", "core_only"))
     if decision_mode not in {"core_only", "llm_only", "llm_review", "hybrid"}:
@@ -182,7 +208,10 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
             decision_raw.get("include_core_suggestion", True),
             "decision.include_core_suggestion",
         ),
+        llm_time_budget=float(decision_raw.get("llm_time_budget", 12.0)),
     )
+    if decision.llm_time_budget <= 0:
+        raise ValueError("配置项 decision.llm_time_budget 必须大于 0")
     return AppConfig(
         server=server,
         agent=agent,

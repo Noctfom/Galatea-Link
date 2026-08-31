@@ -36,6 +36,8 @@ MESSAGE_NAMES = {
     92: "recover",
     93: "equip",
     94: "lp_update",
+    96: "card_target",
+    97: "cancel_target",
     110: "attack",
     111: "battle",
     140: "announce_race",
@@ -95,19 +97,38 @@ class LlmObservationBuilder:
             raise ValueError("玩家编号必须是 0 或 1")
 
         catalog: dict[int, dict[str, Any]] = {}
-        index_to_entity_id: dict[int, str] = {}
+        index_to_entity_id = {
+            index: self._entity_id(entity, player_id)
+            for index, entity in enumerate(snapshot.entities)
+        }
+        index_to_card_code: dict[int, int] = {}
         cards = []
 
         for index, entity in enumerate(snapshot.entities):
-            entity_id = self._entity_id(entity, player_id)
-            index_to_entity_id[index] = entity_id
-            cards.append(self._build_entity(entity, entity_id, player_id, catalog))
+            entity_id = index_to_entity_id[index]
+            card = self._build_entity(
+                entity,
+                entity_id,
+                player_id,
+                index_to_entity_id,
+                catalog,
+            )
+            cards.append(card)
+            if card.get("code"):
+                index_to_card_code[index] = card["code"]
 
         actor = self._relative_player(snapshot.global_data.to_play, player_id)
         legal_actions = []
         if actor == "self":
             legal_actions = [
-                self._build_action(action, choice_id, event_type, index_to_entity_id, catalog)
+                self._build_action(
+                    action,
+                    choice_id,
+                    event_type,
+                    index_to_entity_id,
+                    index_to_card_code,
+                    catalog,
+                )
                 for choice_id, action in enumerate(snapshot.valid_actions)
             ]
 
@@ -132,8 +153,7 @@ class LlmObservationBuilder:
                 "complete_protocol_projection": False,
                 "limitations": [
                     "仅包含 DuelState 当前已经建模的协议字段",
-                    "部分效果描述只有 description_id 而没有对应的选项文本",
-                    "超量素材目前只提供数量而不提供逐张身份",
+                    "部分系统级 description_id 尚无本地化选项文本",
                     "持续效果、无效状态、回合限制和玩家提示尚未完整建模",
                     "近期历史只记录部分公开发动而不是完整效果结算过程",
                 ],
@@ -201,6 +221,7 @@ class LlmObservationBuilder:
         entity,
         entity_id: str,
         player_id: int,
+        index_to_entity_id: dict[int, str],
         catalog: dict[int, dict[str, Any]],
     ) -> dict[str, Any]:
         visible = self._is_identity_visible(entity, player_id)
@@ -217,6 +238,31 @@ class LlmObservationBuilder:
             "counter_count": entity.counter_count,
             "is_equipped": entity.is_equipped,
         }
+        if entity.equip_target_entity_idx in index_to_entity_id:
+            result["equip_target_entity_id"] = index_to_entity_id[
+                entity.equip_target_entity_idx
+            ]
+        equipped_by_ids = [
+            index_to_entity_id[index]
+            for index in entity.equipped_by_entity_indices
+            if index in index_to_entity_id
+        ]
+        if equipped_by_ids:
+            result["equipped_by_entity_ids"] = equipped_by_ids
+        target_ids = [
+            index_to_entity_id[index]
+            for index in entity.target_entity_indices
+            if index in index_to_entity_id
+        ]
+        if target_ids:
+            result["target_entity_ids"] = target_ids
+        targeted_by_ids = [
+            index_to_entity_id[index]
+            for index in entity.targeted_by_entity_indices
+            if index in index_to_entity_id
+        ]
+        if targeted_by_ids:
+            result["targeted_by_entity_ids"] = targeted_by_ids
         if not visible:
             return result
 
@@ -235,6 +281,11 @@ class LlmObservationBuilder:
         if code:
             card = self._register_card(code, catalog)
             result["name"] = card["name"]
+        if entity.overlay_codes:
+            result["overlay_cards"] = self._build_overlay_cards(
+                entity.overlay_codes,
+                catalog,
+            )
         return result
 
     # 判断卡片身份是否对当前玩家可见
@@ -252,6 +303,7 @@ class LlmObservationBuilder:
         choice_id: int,
         event_type: int | None,
         index_to_entity_id: dict[int, str],
+        index_to_card_code: dict[int, int],
         catalog: dict[int, dict[str, Any]],
     ) -> dict[str, Any]:
         action_name = self._action_name(event_type, action.action_type)
@@ -265,6 +317,7 @@ class LlmObservationBuilder:
         target_index = getattr(action, "target_entity_idx", -1)
         if target_index in index_to_entity_id:
             result["target_entity_id"] = index_to_entity_id[target_index]
+        target_card_code = index_to_card_code.get(target_index, 0)
 
         macro_targets = getattr(action, "macro_targets", None) or []
         target_ids = [index_to_entity_id[index] for index in macro_targets if index in index_to_entity_id]
@@ -285,6 +338,41 @@ class LlmObservationBuilder:
         if action_code:
             result["card_code"] = action_code
             result["card_name"] = self._register_card(action_code, catalog)["name"]
+        get_effect_description = getattr(
+            self.card_reader,
+            "get_effect_description",
+            None,
+        )
+        if desc_id and get_effect_description is not None:
+            effect_description = get_effect_description(
+                desc_id,
+                action_code or target_card_code,
+            )
+            if effect_description:
+                result["effect_description"] = effect_description
+                if result["description"] in {action_name, f"Option {choice_id}"}:
+                    result["description"] = effect_description
+        return result
+
+    # 构建按叠放顺序排列的公开超量素材
+    def _build_overlay_cards(
+        self,
+        overlay_codes,
+        catalog: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result = []
+        for sequence, raw_code in enumerate(overlay_codes):
+            code = self._pure_code(raw_code)
+            if not code:
+                continue
+            card = self._register_card(code, catalog)
+            result.append(
+                {
+                    "sequence": sequence,
+                    "code": code,
+                    "name": card["name"],
+                }
+            )
         return result
 
     # 构建公开连锁与历史事件

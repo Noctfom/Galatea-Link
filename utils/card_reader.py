@@ -15,6 +15,7 @@ class CardReader:
         self.cursor = None
         self.cache = {}
         self.text_cache = {}
+        self.effect_text_cache = {}
         self.stats_cache = {}
         self._db_lock = threading.RLock()
         
@@ -72,6 +73,60 @@ class CardReader:
             description = row[0] if row and row[0] else ""
             self.text_cache[code] = description
             return description
+        except Exception:
+            return ""
+
+    # 根据协议描述编号和关联卡片解析具体效果选项文本
+    def get_effect_description(self, description_id, card_code=0):
+        description_id = int(description_id or 0) & 0xFFFFFFFF
+        card_code = int(card_code or 0) & 0x7FFFFFFF
+        cache_key = (description_id, card_code)
+        if cache_key in self.effect_text_cache:
+            return self.effect_text_cache[cache_key]
+
+        candidates = []
+        if card_code:
+            legacy_index = description_id & 0xF
+            legacy_value = ((card_code << 4) | legacy_index) & 0xFFFFFFFF
+            if legacy_value == description_id:
+                candidates.append((card_code, legacy_index))
+
+            modern_index = description_id & 0xFFFFF
+            modern_value = ((card_code << 20) | modern_index) & 0xFFFFFFFF
+            if modern_index < 16 and modern_value == description_id:
+                candidates.append((card_code, modern_index))
+
+        inferred_code = description_id >> 4
+        inferred_index = description_id & 0xF
+        if inferred_code:
+            candidates.append((inferred_code, inferred_index))
+
+        result = ""
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            result = self._query_effect_string(*candidate)
+            if result:
+                break
+
+        self.effect_text_cache[cache_key] = result
+        return result
+
+    # 查询指定卡片的 str1 到 str16 文本
+    def _query_effect_string(self, code, string_index):
+        if not self.cursor or not 0 <= string_index < 16:
+            return ""
+        column = f"str{string_index + 1}"
+        try:
+            with self._db_lock:
+                self.cursor.execute(
+                    f"SELECT {column} FROM texts WHERE id=?",
+                    (code,),
+                )
+                row = self.cursor.fetchone()
+            return row[0] if row and row[0] else ""
         except Exception:
             return ""
 

@@ -27,16 +27,22 @@ llm:
   enabled: true
   provider: "openai_compatible"
   base_url: "https://api.deepseek.com/v1"
-  api_key: "sk-e571d77c77bb42d79541b20c313d5869"                  # 推荐留空并通过下方环境变量提供
+  api_key: ""                  # 推荐留空并通过下方环境变量提供
   api_key_env: "GALATEA_LLM_API_KEY"
-  model: "deepseek-v4-pro"
+  model: "deepseek-v4-flash"
   timeout: 30.0
-  max_tokens: 2048
+  max_tokens: 256
   temperature: 0.1
   response_format: "json_object" # 可选 json_object、json_schema、none
+  trace_requests: true            # 记录输入规模、耗时、结束原因和 token 用量
+  thinking_mode: "disabled"       # 实时决策关闭思考以降低延迟和输出费用
+  cache_static_context: true      # 将固定卡组知识放在动态观察之前以命中前缀缓存
+  cache_deck_text: false          # 开启后缓存整副卡组效果文本但首次请求更大
+  compact_dynamic_observation: true # 删除固定前缀已经提供的重复字段
 
 decision:
   mode: "llm_review"               # 可选 core_only、llm_only、llm_review、hybrid
   core_confidence_threshold: 0.65
   force_llm_message_types: []      # hybrid 模式下强制交给 LLM 的 OCG 消息类型
   include_core_suggestion: true
+  llm_time_budget: 12.0            # 超过预算就取消 LLM 并立即安全回退

@@ -450,6 +450,7 @@ class DuelState:
                         if 'overlays' in host and len(host['overlays']) > old_pos:
                             host['overlays'].pop(old_pos) # 拔除指定层的素材
                 elif old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
+                    self._clear_relations_for_location(old_c, old_l, old_s)
                     del self.field_map[old_c][old_l][old_s] # 正常离场
 
                 # --- 2. 处理进入新位置 ---
@@ -564,12 +565,31 @@ class DuelState:
                     self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
                     
             # [修正] 真正的装备雷达 MSG_EQUIP (93)
-            elif msg_type == 93: 
+            elif msg_type == 93:
                 equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
                 tgt_raw = struct.unpack('<I', stream.read(4))[0]   # 被装备怪兽的位置
+                ec, el, es, _ = LocationInfo.decode(equip_raw)
                 tc, tl, ts, _ = LocationInfo.decode(tgt_raw)
+                equip_info = self._get_card_info(ec, el, es)
+                target_info = self._get_card_info(tc, tl, ts)
+                if equip_info is not None and target_info is not None:
+                    equip_location = (ec, el, es)
+                    target_location = (tc, tl, ts)
+                    equip_info['equip_target'] = target_location
+                    equipped_by = target_info.setdefault('equipped_by', [])
+                    if equip_location not in equipped_by:
+                        equipped_by.append(equip_location)
+                    target_info['is_equipped'] = True
                 if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
                     self.field_map[tc][tl][ts]['is_equipped'] = True
+
+            elif msg_type == 96:
+                source_raw, target_raw = struct.unpack('<II', stream.read(8))
+                self._add_card_target_relation(source_raw, target_raw)
+
+            elif msg_type == 97:
+                source_raw, target_raw = struct.unpack('<II', stream.read(8))
+                self._remove_card_target_relation(source_raw, target_raw)
             
             elif msg_type == 40: self.turn += 1
             elif msg_type == 41: self.phase = struct.unpack('H', stream.read(2))[0]
@@ -588,6 +608,56 @@ class DuelState:
             print(f"⚠️ [GameState] update消息解析失败: {e}")
             # 抛出异常，击毙这局烂尾游戏
             raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+
+    # 获取指定场上位置保存的卡片状态
+    def _get_card_info(self, controller, location, sequence):
+        if controller not in (0, 1):
+            return None
+        return self.field_map[controller].get(location, {}).get(sequence)
+
+    # 添加卡片取对象和被取对象关系
+    def _add_card_target_relation(self, source_raw, target_raw):
+        sc, sl, ss, _ = LocationInfo.decode(source_raw)
+        tc, tl, ts, _ = LocationInfo.decode(target_raw)
+        source_info = self._get_card_info(sc, sl, ss)
+        target_info = self._get_card_info(tc, tl, ts)
+        if source_info is None or target_info is None:
+            return
+        source_location = (sc, sl, ss)
+        target_location = (tc, tl, ts)
+        targets = source_info.setdefault('targets', [])
+        targeted_by = target_info.setdefault('targeted_by', [])
+        if target_location not in targets:
+            targets.append(target_location)
+        if source_location not in targeted_by:
+            targeted_by.append(source_location)
+
+    # 移除卡片取对象和被取对象关系
+    def _remove_card_target_relation(self, source_raw, target_raw):
+        sc, sl, ss, _ = LocationInfo.decode(source_raw)
+        tc, tl, ts, _ = LocationInfo.decode(target_raw)
+        source_info = self._get_card_info(sc, sl, ss)
+        target_info = self._get_card_info(tc, tl, ts)
+        source_location = (sc, sl, ss)
+        target_location = (tc, tl, ts)
+        if source_info is not None and target_location in source_info.get('targets', []):
+            source_info['targets'].remove(target_location)
+        if target_info is not None and source_location in target_info.get('targeted_by', []):
+            target_info['targeted_by'].remove(source_location)
+
+    # 清理离场卡片产生或承受的所有位置关系
+    def _clear_relations_for_location(self, controller, location, sequence):
+        removed_location = (controller, location, sequence)
+        for player in (0, 1):
+            for zone_cards in self.field_map[player].values():
+                for info in zone_cards.values():
+                    if info.get('equip_target') == removed_location:
+                        info['equip_target'] = None
+                    for key in ('equipped_by', 'targets', 'targeted_by'):
+                        relations = info.get(key, [])
+                        if removed_location in relations:
+                            relations.remove(removed_location)
+                    info['is_equipped'] = bool(info.get('equipped_by', []))
 
     def _parse_valid_actions(self, msg_type, stream):
         """
@@ -783,7 +853,15 @@ class DuelState:
                 stream.read(1) # P
                 count = struct.unpack('B', stream.read(1))[0]
                 for i in range(count):
-                    self.current_valid_actions.append(GameAction(action_type=14, index=i, desc_str=f"Option {i}"))
+                    desc = struct.unpack('<I', stream.read(4))[0]
+                    self.current_valid_actions.append(
+                        GameAction(
+                            action_type=14,
+                            index=i,
+                            desc_id=desc,
+                            desc_str=f"Option {i}",
+                        )
+                    )
 
             # 7. MSG_SELECT_POSITION (19)
             elif msg_type == 19:
@@ -1050,7 +1128,8 @@ class DuelState:
         entities = []
         # 构建查找表: (p, l, s) -> entity_index
         # 用于把 Action 里的 Loc 转换成 Entity Index
-        loc_to_idx_map = {} 
+        loc_to_idx_map = {}
+        relation_locations = {}
         
         idx_counter = 0
         zones_order = [Zone.MZONE, Zone.SZONE, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA]
@@ -1116,10 +1195,42 @@ class DuelState:
                         is_public=(pos & 0x1 or pos & 0x4),
                         counter_count=counters,
                         overlay_count=len(overlays),
+                        overlay_codes=tuple(
+                            overlay_code & 0x7FFFFFFF
+                            for overlay_code in overlays
+                            if overlay_code & 0x7FFFFFFF
+                        ),
                         is_equipped=is_equipped
                     ))
+                    relation_locations[idx_counter] = {
+                        'equip_target': info.get('equip_target'),
+                        'equipped_by': list(info.get('equipped_by', [])),
+                        'targets': list(info.get('targets', [])),
+                        'targeted_by': list(info.get('targeted_by', [])),
+                    }
                     entities[-1].top_overlay_code = top_overlay_code
                     idx_counter += 1
+
+        for entity_index, relations in relation_locations.items():
+            entity = entities[entity_index]
+            equip_target = relations['equip_target']
+            if equip_target in loc_to_idx_map:
+                entity.equip_target_entity_idx = loc_to_idx_map[equip_target]
+            entity.equipped_by_entity_indices = [
+                loc_to_idx_map[location]
+                for location in relations['equipped_by']
+                if location in loc_to_idx_map
+            ]
+            entity.target_entity_indices = [
+                loc_to_idx_map[location]
+                for location in relations['targets']
+                if location in loc_to_idx_map
+            ]
+            entity.targeted_by_entity_indices = [
+                loc_to_idx_map[location]
+                for location in relations['targeted_by']
+                if location in loc_to_idx_map
+            ]
 
         # --- [核心步骤] 匹配 Action 指针 ---
         # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"

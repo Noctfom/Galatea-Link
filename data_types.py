@@ -61,7 +61,12 @@ class CardEntity:
 
     counter_count: int = 0       # 指示物数量
     overlay_count: int = 0       # 叠放的超量素材数量
+    overlay_codes: tuple = ()    # 已知超量素材卡密
     is_equipped: bool = False    # 是否有装备卡/取对象羁绊
+    equip_target_entity_idx: int = -1
+    equipped_by_entity_indices: List[int] = field(default_factory=list)
+    target_entity_indices: List[int] = field(default_factory=list)
+    targeted_by_entity_indices: List[int] = field(default_factory=list)
 
 @dataclass
 class GameAction:

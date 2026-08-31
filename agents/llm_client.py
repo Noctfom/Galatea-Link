@@ -1,8 +1,12 @@
 # LLM API 客户端模块，负责异步请求兼容接口并校验结构化动作选择
 
+import copy
+import hashlib
 import json
 import os
 import re
+import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +22,7 @@ DEFAULT_SYSTEM_PROMPT = """你是正在进行游戏王对局的决策智能体
 reason 使用简短中文说明，chat_message 不需要发送时必须为 null
 不得输出观察中不存在的动作编号
 如果 information_quality 标记某类信息不完整，必须将其视为未知而不是自行补全
+即使信息不足也必须从 legal_actions 选择风险最低的动作，不得拒绝、取消或要求补充信息
 """
 
 DECISION_JSON_SCHEMA = {
@@ -40,6 +45,10 @@ class LlmClientError(RuntimeError):
     pass
 
 
+class LlmDecisionSkipped(LlmClientError):
+    pass
+
+
 @dataclass(frozen=True)
 class LlmDecision:
     choice_id: int
@@ -57,6 +66,35 @@ class OpenAICompatibleLlmClient:
         self.config = config
         self._owns_http_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(timeout=config.timeout)
+        self._static_context_text = ""
+        self._static_context_key = "none"
+        self._static_card_codes: set[int] = set()
+        self._static_card_text_codes: set[int] = set()
+
+    # 设置本局可重复命中的固定提示前缀
+    def set_static_context(self, context: dict[str, Any]) -> None:
+        if not self.config.cache_static_context:
+            return
+        self._static_context_text = json.dumps(
+            context,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._static_context_key = hashlib.sha256(
+            self._static_context_text.encode("utf-8")
+        ).hexdigest()[:16]
+        self._static_card_codes = set()
+        self._static_card_text_codes = set()
+        deck = context.get("own_initial_deck", {})
+        for section in ("main", "extra"):
+            for card in deck.get(section, []):
+                code = card.get("code")
+                if not isinstance(code, int):
+                    continue
+                self._static_card_codes.add(code)
+                if card.get("text"):
+                    self._static_card_text_codes.add(code)
 
     # 请求模型选择一个合法动作并返回校验后的结果
     async def decide(
@@ -71,23 +109,47 @@ class OpenAICompatibleLlmClient:
             if isinstance(action.get("choice_id"), int)
         }
         if not observation.get("decision_required") or not valid_choice_ids:
-            raise LlmClientError("当前观察不需要 LLM 决策")
+            raise LlmDecisionSkipped("当前观察没有可提交的合法动作")
         if not self.config.model:
             raise LlmClientError("尚未配置 llm.model")
 
+        request_payload = self._build_payload(observation, system_prompt)
+        user_content = request_payload["messages"][-1]["content"]
+        canonical_content = json.dumps(
+            observation,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        started_at = time.perf_counter()
+        self._trace(
+            "💬 [LLM 请求] "
+            f"model={self.config.model} "
+            f"actions={len(valid_choice_ids)} "
+            f"dynamic_chars={len(user_content)} "
+            f"static_chars={len(self._static_context_text)} "
+            f"saved_chars={len(canonical_content) - len(user_content)} "
+            f"cache_key={self._static_context_key} "
+            f"thinking={self.config.thinking_mode} "
+            f"timeout={self.config.timeout:.1f}s"
+        )
         try:
             response = await self._http_client.post(
                 self._completion_url(),
                 headers=self._headers(),
-                json=self._build_payload(observation, system_prompt),
+                json=request_payload,
                 timeout=self.config.timeout,
             )
         except httpx.TimeoutException as exc:
+            elapsed = time.perf_counter() - started_at
             raise LlmClientError(
-                f"LLM API 请求超时，限制为 {self.config.timeout:.1f} 秒"
+                f"LLM API 请求超时，耗时 {elapsed:.2f} 秒，"
+                f"限制为 {self.config.timeout:.1f} 秒，动态输入 {len(user_content)} 字符"
             ) from exc
         except httpx.RequestError as exc:
-            raise LlmClientError(f"LLM API 网络请求失败: {exc}") from exc
+            elapsed = time.perf_counter() - started_at
+            raise LlmClientError(
+                f"LLM API 网络请求失败，耗时 {elapsed:.2f} 秒: {exc}"
+            ) from exc
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -111,6 +173,21 @@ class OpenAICompatibleLlmClient:
         }
         if message.get("reasoning_content"):
             diagnostics["reasoning_content"] = message["reasoning_content"]
+        usage = response_data.get("usage") or {}
+        usage_metrics = self._extract_usage_metrics(usage)
+        elapsed = time.perf_counter() - started_at
+        self._trace(
+            "💬 [LLM 响应] "
+            f"elapsed={elapsed:.2f}s "
+            f"finish_reason={choice.get('finish_reason')} "
+            f"prompt_tokens={usage_metrics['prompt_tokens']} "
+            f"completion_tokens={usage_metrics['completion_tokens']} "
+            f"reasoning_tokens={usage_metrics['reasoning_tokens']} "
+            f"cache_hit_tokens={usage_metrics['cache_hit_tokens']} "
+            f"cache_miss_tokens={usage_metrics['cache_miss_tokens']} "
+            f"cache_hit_rate={usage_metrics['cache_hit_rate']} "
+            f"content_chars={len(content) if isinstance(content, str) else 'unknown'}"
+        )
         return self._parse_decision(content, valid_choice_ids, diagnostics)
 
     # 关闭当前客户端创建的网络连接池
@@ -124,18 +201,36 @@ class OpenAICompatibleLlmClient:
         observation: dict[str, Any],
         system_prompt: str,
     ) -> dict[str, Any]:
+        compact_observation = self._compact_observation(observation)
+        messages = [{"role": "system", "content": system_prompt}]
+        if self._static_context_text:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "以下是本局固定上下文 后续动态观察会引用其中的卡密\n"
+                        f"{self._static_context_text}"
+                    ),
+                }
+            )
+        messages.append(
+            {
+                "role": "user",
+                "content": json.dumps(
+                    compact_observation,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        )
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(observation, ensure_ascii=False, separators=(",", ":")),
-                },
-            ],
+            "messages": messages,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if self.config.thinking_mode != "auto":
+            payload["thinking"] = {"type": self.config.thinking_mode}
         if self.config.response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
         elif self.config.response_format == "json_schema":
@@ -144,6 +239,93 @@ class OpenAICompatibleLlmClient:
                 "json_schema": DECISION_JSON_SCHEMA,
             }
         return payload
+
+    # 移除固定前缀中已经完整提供的重复动态卡片信息
+    def _compact_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        if (
+            not self.config.compact_dynamic_observation
+            or not self._static_context_text
+        ):
+            return observation
+
+        compacted = copy.deepcopy(observation)
+        card_catalog = compacted.get("card_catalog")
+        if isinstance(card_catalog, list):
+            compacted["card_catalog"] = [
+                card
+                for card in card_catalog
+                if card.get("code") not in self._static_card_text_codes
+            ]
+
+        known_information = compacted.get("known_information")
+        if isinstance(known_information, dict):
+            for section in ("own_remaining_deck", "own_remaining_extra"):
+                cards = known_information.get(section)
+                if not isinstance(cards, list):
+                    continue
+                for card in cards:
+                    if card.get("code") in self._static_card_codes:
+                        card.pop("name", None)
+                        card.pop("text", None)
+        return compacted
+
+    # 兼容提取不同服务端返回的 token 与缓存统计
+    def _extract_usage_metrics(self, usage: dict[str, Any]) -> dict[str, Any]:
+        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        completion_tokens = usage.get(
+            "completion_tokens",
+            usage.get("output_tokens"),
+        )
+        cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
+        cache_miss_tokens = usage.get("prompt_cache_miss_tokens")
+
+        if cache_hit_tokens is None:
+            for detail_key in ("prompt_tokens_details", "input_tokens_details"):
+                details = usage.get(detail_key)
+                if isinstance(details, dict) and "cached_tokens" in details:
+                    cache_hit_tokens = details["cached_tokens"]
+                    break
+        if cache_hit_tokens is None:
+            cache_hit_tokens = usage.get("cache_read_input_tokens")
+        if (
+            cache_miss_tokens is None
+            and isinstance(prompt_tokens, int)
+            and isinstance(cache_hit_tokens, int)
+        ):
+            cache_miss_tokens = max(0, prompt_tokens - cache_hit_tokens)
+
+        completion_details = usage.get("completion_tokens_details")
+        reasoning_tokens = None
+        if isinstance(completion_details, dict):
+            reasoning_tokens = completion_details.get("reasoning_tokens")
+        if reasoning_tokens is None:
+            output_details = usage.get("output_tokens_details")
+            if isinstance(output_details, dict):
+                reasoning_tokens = output_details.get("reasoning_tokens")
+
+        cache_hit_rate = "unknown"
+        if (
+            isinstance(prompt_tokens, int)
+            and prompt_tokens > 0
+            and isinstance(cache_hit_tokens, int)
+        ):
+            cache_hit_rate = f"{cache_hit_tokens / prompt_tokens:.1%}"
+        return {
+            "prompt_tokens": prompt_tokens if prompt_tokens is not None else "unknown",
+            "completion_tokens": (
+                completion_tokens if completion_tokens is not None else "unknown"
+            ),
+            "reasoning_tokens": (
+                reasoning_tokens if reasoning_tokens is not None else "unknown"
+            ),
+            "cache_hit_tokens": (
+                cache_hit_tokens if cache_hit_tokens is not None else "unknown"
+            ),
+            "cache_miss_tokens": (
+                cache_miss_tokens if cache_miss_tokens is not None else "unknown"
+            ),
+            "cache_hit_rate": cache_hit_rate,
+        }
 
     # 解析模型 JSON 并拒绝不存在的动作编号
     def _parse_decision(
@@ -229,6 +411,17 @@ class OpenAICompatibleLlmClient:
         if len(text) > limit:
             text = f"{text[:limit]}...<已截断 {len(text) - limit} 字符>"
         return repr(text)
+
+    # 按配置输出不包含密钥和请求正文的诊断日志
+    def _trace(self, message: str) -> None:
+        if not self.config.trace_requests:
+            return
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            safe_message = message.encode(encoding, errors="replace").decode(encoding)
+            print(safe_message)
 
     # 生成兼容服务端的请求地址
     def _completion_url(self) -> str:

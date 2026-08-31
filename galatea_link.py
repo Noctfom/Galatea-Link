@@ -7,10 +7,16 @@ from concurrent.futures import ThreadPoolExecutor
 from app_config import AppConfig, DecisionConfig, LlmConfig, load_app_config
 from agents.ai_bot import AiBot
 from agents.decision_policy import DecisionOutcome, InterventionPolicy
-from agents.llm_client import create_llm_client
+from agents.llm_client import LlmDecisionSkipped, create_llm_client
 from core.decision_runtime import DecisionCoordinator, DecisionRequest
 from core.gamestate import DuelState
-from core.network import STOC_SELECT_HAND, YgoNetClient, is_select_tp_request
+from core.llm_prompt_context import build_llm_static_context
+from core.network import (
+    STOC_SELECT_HAND,
+    YgoNetClient,
+    _console_print,
+    is_select_tp_request,
+)
 from core.observation import LlmObservationBuilder
 from core.parser import OCGParser
 from core.rule_bot import get_rule_decision
@@ -78,7 +84,18 @@ class GalateaLink:
         self.observation_sequence = 0
         self.latest_observation = None
         self.decision_policy = InterventionPolicy(decision_config or DecisionConfig())
-        self.llm_client = create_llm_client(llm_config or LlmConfig())
+        active_llm_config = llm_config or LlmConfig()
+        self.llm_client = create_llm_client(active_llm_config)
+        if self.llm_client is not None and active_llm_config.cache_static_context:
+            self.llm_client.set_static_context(
+                build_llm_static_context(
+                    self.deck.main,
+                    self.deck.extra,
+                    deck_name=self.deck.name,
+                    agent_name=self.agent_name,
+                    include_card_text=active_llm_config.cache_deck_text,
+                )
+            )
         self.ignore_choice_ids_blacklist = []
         self.last_decision_choice_id = None
         self.last_decision_source = None
@@ -326,13 +343,16 @@ class GalateaLink:
                     copy.deepcopy(request.observation),
                     core_decision,
                 )
-                llm_decision = await self.llm_client.decide(llm_observation)
+                async with asyncio.timeout(
+                    self.decision_policy.config.llm_time_budget
+                ):
+                    llm_decision = await self.llm_client.decide(llm_observation)
                 response = self.ai.pack_choice_from_snapshot(
                     request.snapshot,
                     llm_decision.choice_id,
                     request.msg_type,
                 )
-                print(
+                _console_print(
                     f"💬 LLM 选择动作 [{llm_decision.choice_id}] "
                     f"理由: {llm_decision.reason or '未提供'}"
                 )
@@ -346,8 +366,15 @@ class GalateaLink:
                         core_decision.confidence if core_decision is not None else None
                     ),
                 )
+            except TimeoutError:
+                _console_print(
+                    "💬 LLM 超过决策时间预算并进入安全回退: "
+                    f"{self.decision_policy.config.llm_time_budget:.1f} 秒"
+                )
+            except LlmDecisionSkipped as error:
+                _console_print(f"💬 LLM 本地跳过无效交互: {error}")
             except Exception as error:
-                print(f"💬 LLM 决策失败并进入安全回退: {error}")
+                _console_print(f"💬 LLM 决策失败并进入安全回退: {error}")
 
         if core_decision is not None:
             print(

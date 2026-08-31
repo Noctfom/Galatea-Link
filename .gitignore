@@ -5,3 +5,4 @@ decks/
 models/
 .venv/
 tests/
+config.yaml
