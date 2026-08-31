@@ -9,7 +9,7 @@ import io
 import random
 import itertools
 from game_constants import LocationInfo
-from card_reader import card_db
+from utils.card_reader import card_db
 
 # --- 消息类型常量 ---
 MSG_SELECT_BATTLECMD = 10
@@ -115,11 +115,19 @@ def parse_battle_cmd(msg_data):
 
 # --- 核心决策逻辑 ---
 
-def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
+def get_rule_decision(
+    player_id,
+    msg_type,
+    msg,
+    gamestate,
+    ignore_actions=None,
+    valid_actions=None,
+):
     """
     处理所有交互请求，保证 100% 返回合法格式的数据，防止超时判负。
     """
     if ignore_actions is None: ignore_actions = []
+    action_pool = _shared_valid_actions if valid_actions is None else valid_actions
     payload = msg[1:] # 去掉 msg_type 头
     stream = io.BytesIO(payload)
     
@@ -311,7 +319,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             
             # 彻底抛弃原来愚蠢的“盲猜灰流丽”逻辑
             # 直接从 gamestate 传过来的完美选项池里提取合法的卡密
-            valid_codes = [act.desc_id for act in _shared_valid_actions if act.action_type == 142]
+            valid_codes = [act.desc_id for act in action_pool if act.action_type == 142]
             
             # 过滤掉已经被引擎拒绝的卡（防死锁保护）
             safe_codes = []

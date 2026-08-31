@@ -256,7 +256,7 @@ class GalateaEncoder:
         d_sem_cats, d_sem_reqs, d_sem_scs, d_sem_nums = [], [], [], []
         d_sem_refs, d_sem_races, d_sem_attrs = [], [], []
 
-        from card_reader import card_db
+        from utils.card_reader import card_db
         for code in my_deck[:MAX_DECK_CARDS]:
             try:
                 stats = card_db.get_full_stats(code)

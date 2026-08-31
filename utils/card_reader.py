@@ -6,18 +6,21 @@ CardReader 模块
 
 import sqlite3
 import os
+import threading
 
 class CardReader:
     def __init__(self, db_path='cards.cdb'):
         self.db_path = db_path
         self.conn = None
         self.cursor = None
-        self.cache = {} 
+        self.cache = {}
+        self.text_cache = {}
         self.stats_cache = {}
+        self._db_lock = threading.RLock()
         
         if os.path.exists(db_path):
             try:
-                self.conn = sqlite3.connect(db_path)
+                self.conn = sqlite3.connect(db_path, check_same_thread=False)
                 self.cursor = self.conn.cursor()
             except:
                 print("⚠️ 无法连接 cards.cdb")
@@ -34,8 +37,9 @@ class CardReader:
             
         try:
             # 在 YGOPro 数据库中，alias 字段如果不为 0，就代表它指向原版卡密
-            self.cursor.execute("SELECT alias FROM datas WHERE id=?", (code,))
-            row = self.cursor.fetchone()
+            with self._db_lock:
+                self.cursor.execute("SELECT alias FROM datas WHERE id=?", (code,))
+                row = self.cursor.fetchone()
             if row and row[0] != 0:
                 return row[0] # 返回原版卡密
             return code
@@ -47,19 +51,37 @@ class CardReader:
         if not self.cursor: return f"Code {code}"
         if code in self.cache: return self.cache[code]
         try:
-            self.cursor.execute("SELECT name FROM texts WHERE id=?", (code,))
-            row = self.cursor.fetchone()
+            with self._db_lock:
+                self.cursor.execute("SELECT name FROM texts WHERE id=?", (code,))
+                row = self.cursor.fetchone()
             name = row[0] if row else f"Code {code}"
             self.cache[code] = name
             return name
         except: return f"Code {code}"
 
+    # 查询卡片效果文本并缓存结果
+    def get_card_text(self, code):
+        if not self.cursor:
+            return ""
+        if code in self.text_cache:
+            return self.text_cache[code]
+        try:
+            with self._db_lock:
+                self.cursor.execute("SELECT desc FROM texts WHERE id=?", (code,))
+                row = self.cursor.fetchone()
+            description = row[0] if row and row[0] else ""
+            self.text_cache[code] = description
+            return description
+        except Exception:
+            return ""
+
     def get_card_type(self, code):
         # ... (保持不变) ...
         if not self.cursor: return 0
         try:
-            self.cursor.execute("SELECT type FROM datas WHERE id=?", (code,))
-            row = self.cursor.fetchone()
+            with self._db_lock:
+                self.cursor.execute("SELECT type FROM datas WHERE id=?", (code,))
+                row = self.cursor.fetchone()
             return row[0] if row else 0
         except: return 0
 
@@ -75,10 +97,11 @@ class CardReader:
         if code == 0: return safe_fallback
         if code in self.stats_cache: return self.stats_cache[code]
         if not self.cursor: return safe_fallback
-        
+
         try:
-            self.cursor.execute("SELECT type, race, attribute, level, atk, def, setcode FROM datas WHERE id=?", (code,))
-            row = self.cursor.fetchone()
+            with self._db_lock:
+                self.cursor.execute("SELECT type, race, attribute, level, atk, def, setcode FROM datas WHERE id=?", (code,))
+                row = self.cursor.fetchone()
             if not row: return safe_fallback
             
             raw_type, race, attr, raw_level, atk, defense, raw_setcode = row

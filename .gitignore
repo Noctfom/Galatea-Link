@@ -3,3 +3,5 @@ __pycache__/
 ygopro-core-master/
 decks/
 models/
+.venv/
+tests/

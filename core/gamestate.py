@@ -10,7 +10,7 @@ import json
 import os
 from game_constants import LocationInfo, Zone, Phases
 from collections import defaultdict
-from card_reader import card_db
+from utils.card_reader import card_db
 from data_types import GameSnapshot, GlobalFeature, CardEntity, GameAction
 
 _META_STAPLES = None

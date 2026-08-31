@@ -1,0 +1,5 @@
+# Galatea Link 基础运行依赖
+numpy
+PyYAML>=6.0
+torch
+httpx>=0.27

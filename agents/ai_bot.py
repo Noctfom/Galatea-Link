@@ -8,6 +8,8 @@ import torch.nn as nn
 import os
 import random
 import struct
+from dataclasses import dataclass
+from typing import Any
 # 引入桥接后的 FeatureEncoder
 try:
     from feature_encoder import GalateaEncoder as FeatureEncoder
@@ -16,6 +18,15 @@ except ImportError:
     from galatea_net import FeatureEncoder 
 
 from galatea_net import GalateaNet
+
+
+@dataclass(frozen=True)
+class CoreDecision:
+    choice_id: int
+    action: Any
+    response: Any
+    confidence: float
+    probability_margin: float
 
 class AiBot:
     def __init__(self, device='cpu', net_config=None):
@@ -78,9 +89,19 @@ class AiBot:
         return action, dist.log_prob(action), dist.entropy().mean(), value, v_input
 
     def get_decision(self, gamestate, msg_type, msg_args=None):
-        self.net.eval()
         snap = gamestate.get_snapshot(self.env)
-        if not snap.valid_actions: return None
+        return self.get_decision_from_snapshot(snap, msg_type, msg_args)
+
+    # 根据独立快照计算动作以避免后台线程读取可变对局状态
+    def get_decision_from_snapshot(self, snap, msg_type, msg_args=None):
+        decision = self.get_scored_decision_from_snapshot(snap, msg_type, msg_args)
+        return decision.response if decision is not None else None
+
+    # 计算 Core 动作及用于介入策略的概率信息
+    def get_scored_decision_from_snapshot(self, snap, msg_type, msg_args=None):
+        self.net.eval()
+        if not snap.valid_actions or not snap.entities:
+            return None
 
         tensor_dict = self.encoder.encode(snap, player_id=snap.global_data.to_play)
         
@@ -92,16 +113,33 @@ class AiBot:
             
             # 网络已经内置了 act_mask 并把无效槽位变成了 -1e9
             # 不需要手动切片，直接 Argmax，不可能选到 Padding
-            sel_idx = torch.argmax(logits[0]).item()
+            valid_logits = logits[0][:len(snap.valid_actions)]
+            probabilities = torch.softmax(valid_logits, dim=-1)
+            sel_idx = torch.argmax(probabilities).item()
+            confidence = float(probabilities[sel_idx].item())
+            if len(snap.valid_actions) > 1:
+                top_two = torch.topk(probabilities, k=2).values
+                probability_margin = float((top_two[0] - top_two[1]).item())
+            else:
+                probability_margin = 1.0
 
-        if sel_idx < len(snap.valid_actions):
-            chosen = snap.valid_actions[sel_idx]
-        else:
-            # 兜底：理论上不会走到这里，除非所有动作都被 mask 了
-            chosen = random.choice(snap.valid_actions)
+        chosen = snap.valid_actions[sel_idx]
+        response = self._pack_response(chosen, msg_type, msg_args)
+        return CoreDecision(
+            choice_id=sel_idx,
+            action=chosen,
+            response=response,
+            confidence=confidence,
+            probability_margin=probability_margin,
+        )
 
-        resp = self._pack_response(chosen, msg_type, msg_args)
-        return resp
+    # 将 LLM 返回的合法 choice_id 转换为游戏协议响应
+    def pack_choice_from_snapshot(self, snap, choice_id, msg_type, msg_args=None):
+        if isinstance(choice_id, bool) or not isinstance(choice_id, int):
+            raise ValueError("choice_id 必须是整数")
+        if not 0 <= choice_id < len(snap.valid_actions):
+            raise ValueError(f"choice_id 超出合法动作范围: {choice_id}")
+        return self._pack_response(snap.valid_actions[choice_id], msg_type, msg_args)
 
     def _pack_response(self, action, msg_type=0, msg_args=None):
         # ==========================================================

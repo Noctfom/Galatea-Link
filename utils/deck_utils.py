@@ -4,7 +4,7 @@ Deck 相关的工具函数 (增强版)
 import random
 import os
 import json
-from card_reader import card_db
+from utils.card_reader import card_db
 
 class Deck:
     def __init__(self, name="Unknown"):

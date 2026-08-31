@@ -1,14 +1,19 @@
 # config.yaml
 server:
+  profile: "mdpro3"
   host: "127.0.0.1"
   port: 7911
   password: ""
+  protocol_version: 0x1361
+  game_id: 0
+  connect_timeout: 10.0
+  trace_packets: true
 
 agent:
   name: "Galatea_AI"
   deck: "神秘白龙"
   prefer_second: false       # true 为后手，false 为先手
-  
+
 model:
   device: "cpu"              # 未来如果要上服务器可以改成 "cuda"
   weights_path: "./models/galatea_iter_110.pth"
@@ -17,3 +22,21 @@ model:
     n_heads: 8
     n_layers: 6
     vocab_size: 20000
+
+llm:
+  enabled: true
+  provider: "openai_compatible"
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "sk-e571d77c77bb42d79541b20c313d5869"                  # 推荐留空并通过下方环境变量提供
+  api_key_env: "GALATEA_LLM_API_KEY"
+  model: "deepseek-v4-pro"
+  timeout: 30.0
+  max_tokens: 2048
+  temperature: 0.1
+  response_format: "json_object" # 可选 json_object、json_schema、none
+
+decision:
+  mode: "llm_review"               # 可选 core_only、llm_only、llm_review、hybrid
+  core_confidence_threshold: 0.65
+  force_llm_message_types: []      # hybrid 模式下强制交给 LLM 的 OCG 消息类型
+  include_core_suggestion: true
