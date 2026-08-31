@@ -37,6 +37,11 @@ class DecisionCoordinator:
         self._active_task: asyncio.Task | None = None
         self._closed = False
 
+    # 返回当前仍然有效的决策请求编号
+    @property
+    def active_request_id(self) -> int | None:
+        return self._active_request_id
+
     # 提交新的决策请求并让旧请求立即失效
     async def submit(
         self,

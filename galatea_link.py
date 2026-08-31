@@ -10,6 +10,7 @@ from agents.decision_policy import DecisionOutcome, InterventionPolicy
 from agents.llm_client import LlmDecisionSkipped, create_llm_client
 from core.decision_runtime import DecisionCoordinator, DecisionRequest
 from core.gamestate import DuelState
+from core.link_events import LinkEventBus
 from core.llm_prompt_context import build_llm_static_context
 from core.network import (
     STOC_SELECT_HAND,
@@ -20,6 +21,7 @@ from core.network import (
 from core.observation import LlmObservationBuilder
 from core.parser import OCGParser
 from core.rule_bot import get_rule_decision
+from core.runtime_api import GalateaRuntimeApi
 from utils.deck_utils import load_deck
 
 class GalateaLink:
@@ -53,6 +55,9 @@ class GalateaLink:
         )
         self.password = password
         self.agent_name = agent_name
+        self.event_bus = LinkEventBus()
+        self.duel_active = False
+        self._closed = False
 
         print("🤖 正在唤醒 Galatea AI...")
         self.ai = AiBot(device=model_device, net_config=net_config)
@@ -109,11 +114,21 @@ class GalateaLink:
             self._commit_decision,
             self._handle_decision_error,
         )
+        self.runtime = GalateaRuntimeApi(self, self.event_bus)
 
     async def start(self):
+        self._publish_event(
+            "connection.starting",
+            {"host": self.client.host, "port": self.client.port},
+        )
         if not await self.client.connect():
+            self._publish_event("connection.failed")
             await self.close()
             return
+        self._publish_event(
+            "connection.connected",
+            {"host": self.client.host, "port": self.client.port},
+        )
         try:
             await self.client.send_player_info(self.agent_name)
             await self.client.send_join_game(self.password)
@@ -124,20 +139,30 @@ class GalateaLink:
 
     # 关闭决策、网络和策略线程资源
     async def close(self):
-        await self.decision_coordinator.close()
-        await self.client.close()
-        if self.llm_client is not None:
-            await self.llm_client.close()
-        await asyncio.to_thread(
-            self.policy_executor.shutdown,
-            wait=True,
-            cancel_futures=True,
-        )
+        if self._closed:
+            return
+        self._closed = True
+        self._publish_event("link.closing")
+        try:
+            await self.decision_coordinator.close()
+            await self.client.close()
+            if self.llm_client is not None:
+                await self.llm_client.close()
+            await asyncio.to_thread(
+                self.policy_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+        finally:
+            self.duel_active = False
+            self._publish_event("link.closed")
+            self.event_bus.close()
 
     async def handle_server_msg(self, msg_type, msg_data):
         try:
             if msg_type == 0x12: # STOC_JOIN_GAME
                 print("✅ 成功加入房间！正在上传卡组...")
+                self._publish_event("room.joined")
                 await self.client.send_deck(self.deck.main, self.deck.extra)
                 # 注意：这里先不要发 send_ready()，等服务器下发 0x13 之后再发
                 
@@ -156,23 +181,44 @@ class GalateaLink:
             elif msg_type == 0x02: # STOC_ERROR_MSG
                 if not msg_data:
                     print("🚨 [服务器错误] 收到空错误包")
+                    self._publish_event("server.error", {"error_type": None})
                     return
                 err_type = msg_data[0]
                 if err_type == 2 and len(msg_data) >= 8:
                     err_code = struct.unpack('<I', msg_data[4:8])[0]
                     print(f"\n🚨 [卡组被拒] 违规卡片 Code: {err_code}\n")
+                    self._publish_event(
+                        "server.error",
+                        {"error_type": err_type, "card_code": err_code},
+                    )
                 elif err_type == 2 and len(msg_data) >= 5:
                     err_code = struct.unpack('<I', msg_data[1:5])[0]
                     print(f"\n🚨 [卡组被拒] 违规卡片 Code: {err_code}\n")
+                    self._publish_event(
+                        "server.error",
+                        {"error_type": err_type, "card_code": err_code},
+                    )
+                else:
+                    self._publish_event(
+                        "server.error",
+                        {"error_type": err_type},
+                    )
                     
             # 决斗开始 (0x15)
             elif msg_type == 0x15 and len(msg_data) == 0:
                 print("⚔️ 决斗房间已锁定！进入战前准备阶段。")
                 await self._reset_duel_state()
+                self.duel_active = True
+                self._publish_event("duel.started")
 
             # 大厅退人 (0x14) 或决斗结束 (0x16)
             elif msg_type in [0x14, 0x16] and len(msg_data) == 0:
                 print("🏁 决斗会话已经结束")
+                self.duel_active = False
+                self._publish_event(
+                    "duel.ended",
+                    {"server_message_type": msg_type},
+                )
                 await self._reset_duel_state()
 
             elif msg_type == STOC_SELECT_HAND and len(msg_data) == 0:
@@ -242,6 +288,10 @@ class GalateaLink:
 
         except Exception as e:
             print(f"❌ 消息处理崩溃: {e}")
+            self._publish_event(
+                "message.processing_failed",
+                {"server_message_type": msg_type, "error": str(e)},
+            )
             traceback.print_exc()
 
     # 创建独立快照并提交后台决策任务
@@ -277,6 +327,18 @@ class GalateaLink:
         if decision_observation is not None:
             decision_observation["decision_request_id"] = request.request_id
             self.latest_observation = decision_observation
+        self._publish_event(
+            "decision.requested",
+            {
+                "request_id": request.request_id,
+                "message_type": msg_type,
+                "legal_action_count": len(
+                    decision_observation.get("legal_actions", [])
+                    if decision_observation
+                    else []
+                ),
+            },
+        )
         print(f"🧭 已提交异步决策请求 #{request.request_id}")
 
     # 保存每条游戏消息处理后的 LLM 可见观察
@@ -289,10 +351,27 @@ class GalateaLink:
         )
         observation["observation_id"] = self.observation_sequence
         self.latest_observation = observation
+        self._publish_event(
+            "observation.updated",
+            {
+                "observation_id": observation["observation_id"],
+                "event": copy.deepcopy(observation.get("event")),
+                "turn": copy.deepcopy(observation.get("turn")),
+                "decision_required": observation.get("decision_required", False),
+                "legal_action_count": len(observation.get("legal_actions", [])),
+            },
+        )
 
     # 返回最新观察副本供后续 LLM 和 AstrBot 接口读取
     def get_latest_llm_observation(self):
         return copy.deepcopy(self.latest_observation)
+
+    # 安全发布事件并兼容仅构造部分属性的单元测试实例
+    def _publish_event(self, event_type, payload=None):
+        event_bus = getattr(self, "event_bus", None)
+        if event_bus is None:
+            return None
+        return event_bus.publish(event_type, payload)
 
     # 返回玩家视角并让观战或未分配状态安全回退
     def _perspective_player_id(self):
@@ -312,6 +391,10 @@ class GalateaLink:
             self.gamestate.p0_extra = []
             self.gamestate.p1_deck = list(self.deck.main)
             self.gamestate.p1_extra = list(self.deck.extra)
+        self._publish_event(
+            "room.seat.assigned",
+            {"player_id": player_id, "is_duelist": player_id in (0, 1)},
+        )
 
     # 重置单局状态并让未完成的旧决策失效
     async def _reset_duel_state(self):
@@ -332,12 +415,30 @@ class GalateaLink:
         core_decision = None
         if self.decision_policy.should_run_core() and not request.ignore_actions:
             core_decision = await self._compute_core_decision(request)
+            if core_decision is not None:
+                self._publish_event(
+                    "core.suggested",
+                    {
+                        "request_id": request.request_id,
+                        "choice_id": core_decision.choice_id,
+                        "confidence": core_decision.confidence,
+                        "probability_margin": core_decision.probability_margin,
+                    },
+                )
 
         should_use_llm = self.decision_policy.should_use_llm(
             request.msg_type,
             core_decision,
         )
         if should_use_llm and self.llm_client is not None and request.observation:
+            self._publish_event(
+                "llm.requested",
+                {
+                    "request_id": request.request_id,
+                    "message_type": request.msg_type,
+                    "core_available": core_decision is not None,
+                },
+            )
             try:
                 llm_observation = self.decision_policy.attach_core_suggestion(
                     copy.deepcopy(request.observation),
@@ -356,6 +457,15 @@ class GalateaLink:
                     f"💬 LLM 选择动作 [{llm_decision.choice_id}] "
                     f"理由: {llm_decision.reason or '未提供'}"
                 )
+                self._publish_event(
+                    "llm.completed",
+                    {
+                        "request_id": request.request_id,
+                        "choice_id": llm_decision.choice_id,
+                        "reason": llm_decision.reason,
+                        "has_chat_message": bool(llm_decision.chat_message),
+                    },
+                )
                 return DecisionOutcome(
                     response=response,
                     source="llm",
@@ -371,10 +481,25 @@ class GalateaLink:
                     "💬 LLM 超过决策时间预算并进入安全回退: "
                     f"{self.decision_policy.config.llm_time_budget:.1f} 秒"
                 )
+                self._publish_event(
+                    "llm.timed_out",
+                    {
+                        "request_id": request.request_id,
+                        "time_budget": self.decision_policy.config.llm_time_budget,
+                    },
+                )
             except LlmDecisionSkipped as error:
                 _console_print(f"💬 LLM 本地跳过无效交互: {error}")
+                self._publish_event(
+                    "llm.skipped",
+                    {"request_id": request.request_id, "reason": str(error)},
+                )
             except Exception as error:
                 _console_print(f"💬 LLM 决策失败并进入安全回退: {error}")
+                self._publish_event(
+                    "llm.failed",
+                    {"request_id": request.request_id, "error": str(error)},
+                )
 
         if core_decision is not None:
             print(
@@ -437,10 +562,33 @@ class GalateaLink:
         self.last_decision_source = outcome.source
         self.latest_chat_suggestion = outcome.chat_message
         await self.client.send_decision(outcome.response)
+        self._publish_event(
+            "decision.committed",
+            {
+                "request_id": request.request_id,
+                "source": outcome.source,
+                "choice_id": outcome.choice_id,
+                "reason": outcome.reason,
+                "core_confidence": outcome.core_confidence,
+            },
+        )
+        if outcome.chat_message:
+            self._publish_event(
+                "chat.suggested",
+                {
+                    "request_id": request.request_id,
+                    "message": outcome.chat_message,
+                    "source": outcome.source,
+                },
+            )
 
     # 记录未被策略内部兜底处理的决策异常
     async def _handle_decision_error(self, request: DecisionRequest, error: Exception):
         print(f"❌ 决策请求 #{request.request_id} 执行失败: {error}")
+        self._publish_event(
+            "decision.failed",
+            {"request_id": request.request_id, "error": str(error)},
+        )
         traceback.print_exception(type(error), error, error.__traceback__)
 
 # 根据应用配置创建对局连接实例
