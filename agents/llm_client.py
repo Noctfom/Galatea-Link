@@ -16,10 +16,14 @@ from app_config import LlmConfig
 
 
 DEFAULT_SYSTEM_PROMPT = """你是正在进行游戏王对局的决策智能体
-你只能使用用户提供的可见观察和合法动作，不得推测隐藏卡片身份
+你只能使用用户提供的可见观察和合法动作
 从 legal_actions 中选择一个 choice_id
-只输出 JSON 对象，字段为 choice_id、reason、chat_message
+只输出 JSON 对象，字段为 choice_id、reason、chat_message、intervention_update
 reason 使用简短中文说明，chat_message 不需要发送时必须为 null
+intervention_update 用于调整后续决策的介入方式，不需要调整时必须为 null
+只有 runtime_controls.autonomy.enabled 为 true 时才允许提出介入调整
+介入调整必须遵守 runtime_controls.autonomy 中的模式、阈值、数量和 TTL 护栏
+提出介入调整时 base_revision 必须等于 runtime_controls.revision
 不得输出观察中不存在的动作编号
 如果 information_quality 标记某类信息不完整，必须将其视为未知而不是自行补全
 即使信息不足也必须从 legal_actions 选择风险最低的动作，不得拒绝、取消或要求补充信息
@@ -34,8 +38,62 @@ DECISION_JSON_SCHEMA = {
             "choice_id": {"type": "integer"},
             "reason": {"type": "string"},
             "chat_message": {"type": ["string", "null"]},
+            "intervention_update": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "mode": {
+                                "enum": [
+                                    "core_only",
+                                    "llm_only",
+                                    "llm_review",
+                                    "hybrid",
+                                    None,
+                                ]
+                            },
+                            "core_confidence_threshold": {
+                                "type": ["number", "null"]
+                            },
+                            "force_llm_message_types": {
+                                "anyOf": [
+                                    {
+                                        "type": "array",
+                                        "items": {"type": "integer"},
+                                    },
+                                    {"type": "null"},
+                                ]
+                            },
+                            "ttl_decisions": {
+                                "type": "integer",
+                                "minimum": 1,
+                            },
+                            "reason": {"type": "string"},
+                            "base_revision": {
+                                "type": "integer",
+                                "minimum": 0,
+                            },
+                        },
+                        "required": [
+                            "mode",
+                            "core_confidence_threshold",
+                            "force_llm_message_types",
+                            "ttl_decisions",
+                            "reason",
+                            "base_revision",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {"type": "null"},
+                ]
+            },
         },
-        "required": ["choice_id", "reason", "chat_message"],
+        "required": [
+            "choice_id",
+            "reason",
+            "chat_message",
+            "intervention_update",
+        ],
         "additionalProperties": False,
     },
 }
@@ -50,10 +108,21 @@ class LlmDecisionSkipped(LlmClientError):
 
 
 @dataclass(frozen=True)
+class LlmInterventionUpdate:
+    mode: str | None = None
+    core_confidence_threshold: float | None = None
+    force_llm_message_types: tuple[int, ...] | None = None
+    ttl_decisions: int = 1
+    reason: str = ""
+    base_revision: int = 0
+
+
+@dataclass(frozen=True)
 class LlmDecision:
     choice_id: int
     reason: str
     chat_message: str | None = None
+    intervention_update: LlmInterventionUpdate | None = None
 
 
 class OpenAICompatibleLlmClient:
@@ -359,10 +428,78 @@ class OpenAICompatibleLlmClient:
             raise LlmClientError("LLM 返回的 reason 必须是字符串")
         if chat_message is not None and not isinstance(chat_message, str):
             raise LlmClientError("LLM 返回的 chat_message 必须是字符串或 null")
+        intervention_update = self._parse_intervention_update(
+            payload.get("intervention_update")
+        )
         return LlmDecision(
             choice_id=choice_id,
             reason=reason.strip(),
             chat_message=chat_message.strip() if chat_message else None,
+            intervention_update=intervention_update,
+        )
+
+    # 解析并校验 LLM 对后续介入策略的临时调整建议
+    def _parse_intervention_update(self, payload: Any) -> LlmInterventionUpdate | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise LlmClientError("LLM 返回的 intervention_update 必须是对象或 null")
+
+        mode = payload.get("mode")
+        if mode is not None and mode not in {
+            "core_only",
+            "llm_only",
+            "llm_review",
+            "hybrid",
+        }:
+            raise LlmClientError(f"LLM 返回了非法介入模式: {mode}")
+
+        threshold = payload.get("core_confidence_threshold")
+        if threshold is not None:
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                raise LlmClientError("LLM 返回的介入置信度必须是数字或 null")
+            threshold = float(threshold)
+            if not 0.0 <= threshold <= 1.0:
+                raise LlmClientError("LLM 返回的介入置信度必须位于 0 到 1")
+
+        force_types_payload = payload.get("force_llm_message_types")
+        force_types = None
+        if force_types_payload is not None:
+            if not isinstance(force_types_payload, list):
+                raise LlmClientError("LLM 返回的强制介入时点必须是数组或 null")
+            normalized_force_types = []
+            for value in force_types_payload:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise LlmClientError("LLM 返回的强制介入时点必须是整数")
+                if not 0 <= value <= 0xFF:
+                    raise LlmClientError("LLM 返回的强制介入时点必须位于 0 到 255")
+                if value not in normalized_force_types:
+                    normalized_force_types.append(value)
+            force_types = tuple(normalized_force_types)
+
+        ttl_decisions = payload.get("ttl_decisions", 1)
+        if isinstance(ttl_decisions, bool) or not isinstance(ttl_decisions, int):
+            raise LlmClientError("LLM 返回的介入 TTL 必须是整数")
+        if ttl_decisions < 1:
+            raise LlmClientError("LLM 返回的介入 TTL 必须大于 0")
+
+        update_reason = payload.get("reason", "")
+        if not isinstance(update_reason, str):
+            raise LlmClientError("LLM 返回的介入调整理由必须是字符串")
+        base_revision = payload.get("base_revision")
+        if isinstance(base_revision, bool) or not isinstance(base_revision, int):
+            raise LlmClientError("LLM 返回的控制面基准版本必须是整数")
+        if base_revision < 0:
+            raise LlmClientError("LLM 返回的控制面基准版本不能小于 0")
+        if mode is None and threshold is None and force_types is None:
+            raise LlmClientError("LLM 返回的介入调整没有任何有效字段")
+        return LlmInterventionUpdate(
+            mode=mode,
+            core_confidence_threshold=threshold,
+            force_llm_message_types=force_types,
+            ttl_decisions=ttl_decisions,
+            reason=update_reason.strip(),
+            base_revision=base_revision,
         )
 
     # 移除常见 Markdown JSON 代码块包装

@@ -444,6 +444,9 @@ class GalateaLink:
                     copy.deepcopy(request.observation),
                     core_decision,
                 )
+                runtime = getattr(self, "runtime", None)
+                if runtime is not None:
+                    llm_observation["runtime_controls"] = runtime.get_controls()
                 async with asyncio.timeout(
                     self.decision_policy.config.llm_time_budget
                 ):
@@ -464,6 +467,9 @@ class GalateaLink:
                         "choice_id": llm_decision.choice_id,
                         "reason": llm_decision.reason,
                         "has_chat_message": bool(llm_decision.chat_message),
+                        "has_intervention_update": bool(
+                            llm_decision.intervention_update
+                        ),
                     },
                 )
                 return DecisionOutcome(
@@ -472,6 +478,7 @@ class GalateaLink:
                     choice_id=llm_decision.choice_id,
                     reason=llm_decision.reason,
                     chat_message=llm_decision.chat_message,
+                    intervention_update=llm_decision.intervention_update,
                     core_confidence=(
                         core_decision.confidence if core_decision is not None else None
                     ),
@@ -570,8 +577,10 @@ class GalateaLink:
                 "choice_id": outcome.choice_id,
                 "reason": outcome.reason,
                 "core_confidence": outcome.core_confidence,
+                "has_intervention_update": bool(outcome.intervention_update),
             },
         )
+        await self._apply_decision_controls(request, outcome)
         if outcome.chat_message:
             self._publish_event(
                 "chat.suggested",
@@ -580,6 +589,29 @@ class GalateaLink:
                     "message": outcome.chat_message,
                     "source": outcome.source,
                 },
+            )
+
+    # 推进旧自主覆盖并安全应用本次 LLM 的新宏观调整
+    async def _apply_decision_controls(
+        self,
+        request: DecisionRequest,
+        outcome: DecisionOutcome,
+    ) -> None:
+        runtime = getattr(self, "runtime", None)
+        if runtime is None:
+            return
+        try:
+            await runtime.on_decision_committed(request.request_id)
+            if outcome.intervention_update is not None:
+                await runtime.apply_autonomous_intervention(
+                    outcome.intervention_update,
+                    request_id=request.request_id,
+                )
+        except Exception as error:
+            _console_print(f"⚠️ 宏观控制更新失败并保持当前策略: {error}")
+            self._publish_event(
+                "runtime.controls.failed",
+                {"request_id": request.request_id, "error": str(error)},
             )
 
     # 记录未被策略内部兜底处理的决策异常

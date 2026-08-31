@@ -46,3 +46,9 @@ decision:
   force_llm_message_types: []      # hybrid 模式下强制交给 LLM 的 OCG 消息类型
   include_core_suggestion: true
   llm_time_budget: 12.0            # 超过预算就取消 LLM 并立即安全回退
+  autonomous_intervention_enabled: false # LLM 自主调整后续介入策略的总开关
+  autonomous_allowed_modes: ["core_only", "hybrid", "llm_review", "llm_only"]
+  autonomous_core_confidence_min: 0.2
+  autonomous_core_confidence_max: 0.9
+  autonomous_max_ttl_decisions: 3  # 单次自主调整最多持续的后续决策数
+  autonomous_max_force_message_types: 8

@@ -14,6 +14,7 @@ class DecisionOutcome:
     reason: str = ""
     chat_message: str | None = None
     core_confidence: float | None = None
+    intervention_update: Any = None
 
 
 class InterventionPolicy:

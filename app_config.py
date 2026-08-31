@@ -57,6 +57,17 @@ class DecisionConfig:
     force_llm_message_types: tuple[int, ...] = ()
     include_core_suggestion: bool = True
     llm_time_budget: float = 12.0
+    autonomous_intervention_enabled: bool = False
+    autonomous_allowed_modes: tuple[str, ...] = (
+        "core_only",
+        "hybrid",
+        "llm_review",
+        "llm_only",
+    )
+    autonomous_core_confidence_min: float = 0.2
+    autonomous_core_confidence_max: float = 0.9
+    autonomous_max_ttl_decisions: int = 3
+    autonomous_max_force_message_types: int = 8
 
 
 @dataclass(frozen=True)
@@ -111,6 +122,22 @@ def _as_int_tuple(value: Any, field_name: str) -> tuple[int, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"配置项 {field_name} 必须是整数列表")
     return tuple(_as_int(item, field_name) for item in value)
+
+
+# 解析去重后的非空字符串列表
+def _as_str_tuple(value: Any, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"配置项 {field_name} 必须是字符串列表")
+    result = []
+    for item in value:
+        normalized = str(item).strip()
+        if not normalized:
+            raise ValueError(f"配置项 {field_name} 不能包含空字符串")
+        if normalized not in result:
+            result.append(normalized)
+    return tuple(result)
 
 
 # 从配置映射构建不可变的应用配置
@@ -209,9 +236,55 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
             "decision.include_core_suggestion",
         ),
         llm_time_budget=float(decision_raw.get("llm_time_budget", 12.0)),
+        autonomous_intervention_enabled=_as_bool(
+            decision_raw.get("autonomous_intervention_enabled", False),
+            "decision.autonomous_intervention_enabled",
+        ),
+        autonomous_allowed_modes=_as_str_tuple(
+            decision_raw.get(
+                "autonomous_allowed_modes",
+                ["core_only", "hybrid", "llm_review", "llm_only"],
+            ),
+            "decision.autonomous_allowed_modes",
+        ),
+        autonomous_core_confidence_min=float(
+            decision_raw.get("autonomous_core_confidence_min", 0.2)
+        ),
+        autonomous_core_confidence_max=float(
+            decision_raw.get("autonomous_core_confidence_max", 0.9)
+        ),
+        autonomous_max_ttl_decisions=_as_int(
+            decision_raw.get("autonomous_max_ttl_decisions", 3),
+            "decision.autonomous_max_ttl_decisions",
+        ),
+        autonomous_max_force_message_types=_as_int(
+            decision_raw.get("autonomous_max_force_message_types", 8),
+            "decision.autonomous_max_force_message_types",
+        ),
     )
     if decision.llm_time_budget <= 0:
         raise ValueError("配置项 decision.llm_time_budget 必须大于 0")
+    invalid_autonomous_modes = set(decision.autonomous_allowed_modes) - {
+        "core_only",
+        "llm_only",
+        "llm_review",
+        "hybrid",
+    }
+    if not decision.autonomous_allowed_modes or invalid_autonomous_modes:
+        raise ValueError("配置项 decision.autonomous_allowed_modes 包含无效模式")
+    if not (
+        0.0
+        <= decision.autonomous_core_confidence_min
+        <= decision.autonomous_core_confidence_max
+        <= 1.0
+    ):
+        raise ValueError("自主介入置信度范围必须位于 0 到 1 且最小值不大于最大值")
+    if decision.autonomous_max_ttl_decisions < 1:
+        raise ValueError("配置项 decision.autonomous_max_ttl_decisions 必须大于 0")
+    if decision.autonomous_max_force_message_types < 0:
+        raise ValueError(
+            "配置项 decision.autonomous_max_force_message_types 不能小于 0"
+        )
     return AppConfig(
         server=server,
         agent=agent,
