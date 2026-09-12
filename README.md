@@ -6,6 +6,8 @@
 
 ![版本](https://img.shields.io/badge/Link-3.0.0-6b8f71)
 
+</div>
+
 Galatea Link 是一个独立的游戏王智能体运行与接入层。它通过 YGOPro 兼容协议连接游戏服务器，并把 Galatea Core 模型、本地 LLM、AstrBot 主智能体、WebUI 与外部 API 统一到同一套异步对局流程中
 
 项目源自 [Galatea Core](https://github.com/Noctfom/Galatea-Core/tree/main) 的在线接入需求，但运行时与 Core 仓库完全独立。Link 项目可以独立运行；模型和运行资产可通过稳定的模型协议或 GKG 部署包导入
