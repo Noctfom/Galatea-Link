@@ -1,0 +1,724 @@
+<!-- Galatea Link 浏览器控制台，集中管理会话、策略、聊天、观察和诊断 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Galatea Link</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body data-theme="light">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/brand-logo.png" alt="">
+        <div>
+          <strong>Galatea Link</strong>
+          <span id="linkVersionLabel">对局控制台</span>
+        </div>
+      </div>
+
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item is-active" type="button" data-page="overview">
+          <span class="nav-icon" aria-hidden="true">概</span><span>概览</span>
+        </button>
+        <button class="nav-item" type="button" data-page="configuration">
+          <span class="nav-icon" aria-hidden="true">配</span><span>配置中心</span>
+        </button>
+        <button class="nav-item" type="button" data-page="decks">
+          <span class="nav-icon" aria-hidden="true">卡</span><span>卡组仓库</span>
+        </button>
+        <button class="nav-item" type="button" data-page="strategy">
+          <span class="nav-icon" aria-hidden="true">策</span><span>决策策略</span>
+        </button>
+        <button class="nav-item" type="button" data-page="models">
+          <span class="nav-icon" aria-hidden="true">模</span><span>模型仓库</span>
+        </button>
+        <button class="nav-item" type="button" data-page="assets">
+          <span class="nav-icon" aria-hidden="true">资</span><span>运行资产</span>
+        </button>
+        <button class="nav-item" type="button" data-page="chat">
+          <span class="nav-icon" aria-hidden="true">聊</span><span>游戏聊天</span>
+        </button>
+        <button class="nav-item" type="button" data-page="observation">
+          <span class="nav-icon" aria-hidden="true">观</span><span>LLM 观察</span>
+        </button>
+        <button class="nav-item" type="button" data-page="events">
+          <span class="nav-icon" aria-hidden="true">诊</span><span>事件与诊断</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="service-state">
+          <span id="serviceDot" class="state-dot"></span>
+          <span id="serviceLabel">正在检查服务</span>
+        </div>
+        <button id="themeToggle" class="quiet-button theme-button" type="button">
+          <span id="themeIcon" aria-hidden="true">☾</span>
+          <span id="themeLabel">深色外观</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div>
+          <button id="mobileNavToggle" class="mobile-nav-toggle" type="button" aria-label="切换导航">菜单</button>
+          <p class="eyebrow">YGOPro Protocol · Model Protocol V3</p>
+          <h1 id="pageTitle">运行概览</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="socketBadge" class="status-pill is-neutral">事件流未连接</span>
+          <button id="globalRefresh" class="secondary-button" type="button">刷新</button>
+        </div>
+      </header>
+
+      <section id="authPanel" class="auth-panel">
+        <div>
+          <strong>连接 Link 服务</strong>
+          <p id="authHint">本机未设置访问令牌时可以直接连接</p>
+        </div>
+        <div class="auth-actions">
+          <label class="sr-only" for="tokenInput">访问令牌</label>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="访问令牌，可留空">
+          <button id="connectButton" class="primary-button" type="button">连接控制台</button>
+        </div>
+      </section>
+
+      <main class="content">
+        <section id="page-overview" class="page is-active" data-page-panel="overview">
+          <div class="metric-grid">
+            <article class="metric-card">
+              <span>服务会话</span>
+              <strong id="sessionMetric">未连接</strong>
+              <small id="sessionMetricNote">等待控制台鉴权</small>
+            </article>
+            <article class="metric-card">
+              <span>游戏连接</span>
+              <strong id="connectionMetric">未知</strong>
+              <small id="connectionMetricNote">尚无运行时数据</small>
+            </article>
+            <article class="metric-card">
+              <span>当前决策</span>
+              <strong id="decisionMetric">—</strong>
+              <small id="decisionMetricNote">等待 Link 启动</small>
+            </article>
+            <article class="metric-card">
+              <span>Core 模型</span>
+              <strong id="modelMetric">未加载</strong>
+              <small id="modelMetricNote">会话启动时按需加载</small>
+            </article>
+            <article class="metric-card">
+              <span>AstrBot 插件</span>
+              <strong id="astrbotMetric">未连接</strong>
+              <small id="astrbotMetricNote">等待插件心跳</small>
+            </article>
+          </div>
+
+          <div class="panel-grid overview-grid">
+            <article class="panel session-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">会话</p>
+                  <h2>Link 运行控制</h2>
+                </div>
+                <span id="generationBadge" class="tag">第 0 代</span>
+              </div>
+              <p class="panel-description">服务本身始终在线，启动会话后才会加载模型并连接 YGOPro 协议服务器</p>
+              <div class="button-row">
+                <button id="startButton" class="primary-button" type="button" disabled>启动 Link</button>
+                <button id="stopButton" class="danger-button" type="button" disabled>停止会话</button>
+              </div>
+              <div id="sessionError" class="inline-alert is-danger" hidden></div>
+            </article>
+
+            <article class="panel status-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">实时状态</p>
+                  <h2>对局与玩家</h2>
+                </div>
+                <span id="duelBadge" class="status-pill is-neutral">未进入对局</span>
+              </div>
+              <dl class="detail-list">
+                <div><dt>大厅座位</dt><dd id="playerIdValue">—</dd></div>
+                <div><dt>Core 视角</dt><dd id="corePlayerIdValue">—</dd></div>
+                <div><dt>当前计时方</dt><dd id="timePlayerValue">—</dd></div>
+                <div><dt>最近决策来源</dt><dd id="lastSourceValue">—</dd></div>
+                <div><dt>最近选择</dt><dd id="lastChoiceValue">—</dd></div>
+                <div><dt>聊天记录</dt><dd id="chatCountValue">0</dd></div>
+              </dl>
+            </article>
+
+            <article class="panel model-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">推理后端</p>
+                  <h2>模型信息</h2>
+                </div>
+              </div>
+              <dl id="modelDetails" class="detail-list compact-list">
+                <div><dt>状态</dt><dd>等待会话启动</dd></div>
+              </dl>
+            </article>
+
+            <article class="panel activity-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">事件摘要</p>
+                  <h2>最近活动</h2>
+                </div>
+                <button class="text-button" type="button" data-go-page="events">查看全部</button>
+              </div>
+              <div id="recentEvents" class="recent-events empty-state">尚未收到事件</div>
+            </article>
+          </div>
+        </section>
+
+        <section id="page-configuration" class="page" data-page-panel="configuration" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">下一次 Link 会话</p>
+              <h2>配置中心</h2>
+              <p>集中管理 YGOPro 协议服务器、Agent、卡组和 LLM 参数，敏感值不会回传到浏览器</p>
+            </div>
+            <span id="configurationRevisionBadge" class="tag">revision —</span>
+          </div>
+
+          <form id="configurationForm">
+            <fieldset id="configurationFieldset" disabled>
+              <div class="panel-grid configuration-grid">
+                <article class="panel form-panel configuration-card">
+                  <div class="panel-heading">
+                    <div><p class="section-kicker">兼容客户端</p><h2>YGOPro 连接</h2></div>
+                    <button class="help-button" type="button" aria-label="查看 YGOPro 配置说明" data-help-title="YGOPro 连接" data-help-body="这里保存的是下一次游戏会话使用的地址和协议参数，MDPro3 是兼容客户端之一。连通测试只建立 TCP 后立即关闭，不会加入房间或发送密码">?</button>
+                  </div>
+                  <div class="form-grid">
+                    <label class="field"><span>协议配置</span><input id="serverProfileInput" type="text" value="ygopro" readonly></label>
+                    <label class="field"><span>服务器地址</span><input id="serverHostInput" type="text" required maxlength="255" placeholder="127.0.0.1"></label>
+                    <label class="field"><span>端口</span><input id="serverPortInput" type="number" min="1" max="65535" required></label>
+                    <label class="field"><span>协议版本</span><input id="serverProtocolInput" type="text" required placeholder="0x1361"><small>支持十进制或 0x 十六进制</small></label>
+                    <label class="field"><span>房间编号</span><input id="serverGameIdInput" type="number" min="0" step="1"></label>
+                    <label class="field"><span>连接超时</span><div class="input-suffix"><input id="serverTimeoutInput" type="number" min="0.5" max="120" step="0.5"><span>秒</span></div></label>
+                    <label class="field"><span>版本重试上限</span><input id="serverVersionRetriesInput" type="number" min="0" max="3" step="1"><small>建议保持 1 次，避免错误服务端造成循环</small></label>
+                    <label class="switch-row full-field"><input id="autoNegotiateVersionInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>自动协商协议版本</strong><small>收到 YGOPro 服务端版本拒绝时读取其要求版本并有限重连</small></span></label>
+                    <label class="switch-row full-field"><input id="tracePacketsInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>输出协议诊断</strong><small>排查网络解析问题时开启，正常使用可以关闭</small></span></label>
+                  </div>
+                  <div class="configuration-test-row">
+                    <span id="serverPasswordBadge" class="status-pill is-neutral">房间密码未配置</span>
+                    <button id="testServerButton" class="secondary-button" type="button">测试 TCP 连通</button>
+                  </div>
+                  <div id="serverTestResult" class="inline-alert test-result" hidden></div>
+                </article>
+
+                <article class="panel form-panel configuration-card">
+                  <div class="panel-heading">
+                    <div><p class="section-kicker">玩家身份</p><h2>Agent 与卡组</h2></div>
+                  </div>
+                  <div class="form-grid">
+                    <label class="field"><span>Agent 名称</span><input id="agentNameInput" type="text" required maxlength="20"><small>游戏协议最多容纳 20 个 UTF-16 编码单元</small></label>
+                    <label class="field"><span>使用卡组</span><select id="agentDeckInput" required></select><small>读取 Link 根目录 decks 中的 YDK</small></label>
+                    <label class="switch-row full-field"><input id="preferSecondInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong class="label-with-help">偏好后攻 <button class="help-button" type="button" aria-label="查看先后攻说明" data-help-title="先后攻偏好" data-help-body="关闭表示猜拳获胜时选择让自己先攻，开启表示选择让自己后攻。这个设置不会改变猜拳胜负，只改变获胜后的选择">?</button></strong><small>关闭时优先让自己先攻</small></span></label>
+                  </div>
+                  <div class="configuration-note">修改名称或卡组只影响下一次启动的 Link 会话，不会热替换正在进行的对局</div>
+                </article>
+
+                <article class="panel form-panel configuration-card llm-configuration-card">
+                  <div class="panel-heading">
+                    <div><p class="section-kicker">OpenAI Compatible</p><h2>LLM API</h2></div>
+                    <span id="llmKeyBadge" class="status-pill is-neutral">密钥未配置</span>
+                  </div>
+                  <label class="switch-row emphasized-switch"><input id="llmEnabledInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>启用 LLM 决策</strong><small>关闭后 llm-only 等模式会进入 Core 或规则安全回退</small></span></label>
+                  <div class="form-grid">
+                    <label class="field"><span>提供方</span><select id="llmProviderInput"><option value="openai_compatible">OpenAI Compatible</option></select></label>
+                    <label class="field"><span>模型名称</span><input id="llmModelInput" type="text" maxlength="255" placeholder="例如 deepseek-v4-flash"></label>
+                    <label class="field full-field"><span>Base URL</span><input id="llmBaseUrlInput" type="url" required maxlength="2048" placeholder="https://api.example.com/v1"></label>
+                    <label class="field full-field"><span>API Key</span><input id="llmApiKeyInput" type="password" autocomplete="new-password" maxlength="16384" placeholder="留空保持现有密钥"><small>保存在 Link 本机 link_secrets.json，页面不会读取或回显已有值</small></label>
+                    <label class="field"><span>密钥环境变量</span><input id="llmApiKeyEnvInput" type="text" maxlength="128" placeholder="GALATEA_LLM_API_KEY"><small>密钥值仍在环境变量或 config.yaml 中配置</small></label>
+                    <label class="field"><span class="label-with-help">本地 LLM API 请求超时 <button class="help-button" type="button" aria-label="查看本地 LLM API 请求超时说明" data-help-title="本地 LLM API 请求超时" data-help-body="只限制 Link 直接调用本地配置 LLM API 的单次网络请求，不控制 AstrBot 主智能体，也不会延长游戏动作等待时间。动作等待上限请在决策策略页修改 LLM 决策总预算">?</button></span><div class="input-suffix"><input id="llmTimeoutInput" type="number" min="0.5" max="300" step="0.5"><span>秒</span></div></label>
+                    <label class="field"><span>最大输出 Token</span><input id="llmMaxTokensInput" type="number" min="1" max="32768" step="1"></label>
+                    <label class="field"><span class="label-with-help">LLM 温度 <button class="help-button" type="button" aria-label="查看 LLM 温度说明" data-help-title="LLM 温度" data-help-body="控制文字模型输出的随机性，与 Core 模型温度相互独立。实时动作决策通常建议 0 到 0.3，较高值可能增加格式错误和不稳定选择">?</button></span><input id="llmTemperatureInput" type="number" min="0" max="2" step="0.05"></label>
+                    <label class="field"><span>结构化输出</span><select id="llmResponseFormatInput"><option value="json_object">JSON Object</option><option value="json_schema">JSON Schema</option><option value="none">不指定</option></select></label>
+                    <label class="field"><span>思考模式</span><select id="llmThinkingInput"><option value="disabled">关闭</option><option value="auto">自动</option><option value="enabled">开启</option></select></label>
+                  </div>
+                  <div class="option-stack">
+                    <label class="switch-row"><input id="llmTraceInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>请求诊断日志</strong><small>记录耗时、Token 和缓存命中，不打印密钥</small></span></label>
+                    <label class="switch-row"><input id="llmCacheStaticInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong class="label-with-help">缓存固定上下文 <button class="help-button" type="button" aria-label="查看固定上下文缓存说明" data-help-title="缓存固定上下文" data-help-body="把本局不变的系统说明和卡组信息放在提示词前部，支持前缀缓存的服务通常能显著降低后续请求费用">?</button></strong><small>建议保持开启</small></span></label>
+                    <label class="switch-row"><input id="llmCacheDeckTextInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong class="label-with-help">缓存整副卡组文本 <button class="help-button" type="button" aria-label="查看卡组文本缓存说明" data-help-title="缓存整副卡组文本" data-help-body="首次请求会明显变大，但后续可能命中更多卡片效果文本缓存。供应商不支持缓存或卡组较大时会增加费用，默认关闭">?</button></strong><small>首次成本更高，按供应商缓存能力决定</small></span></label>
+                    <label class="switch-row"><input id="llmCompactInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>压缩动态观察</strong><small>删除固定前缀已包含的重复信息，建议保持开启</small></span></label>
+                  </div>
+                  <div class="configuration-test-row">
+                    <span>测试会产生一次小型 LLM 请求</span>
+                    <div class="button-row">
+                      <button id="saveLlmApiKeyButton" class="secondary-button" type="button">保存 API Key</button>
+                      <button id="clearLlmApiKeyButton" class="text-button" type="button">清除本地 Key</button>
+                      <button id="testLlmButton" class="secondary-button" type="button">测试结构化输出</button>
+                    </div>
+                  </div>
+                  <div id="llmTestResult" class="inline-alert test-result" hidden></div>
+                </article>
+
+                <article class="panel configuration-card service-boundary-card">
+                  <div class="panel-heading">
+                    <div><p class="section-kicker">只读</p><h2>服务与依赖</h2></div>
+                    <button class="help-button" type="button" aria-label="查看服务设置说明" data-help-title="为什么这里不能修改" data-help-body="监听地址、端口和鉴权令牌决定当前 WebUI 如何连接自身，运行时热改会导致控制台断线。这些值继续由 config.yaml 或环境变量管理，重启服务后生效">?</button>
+                  </div>
+                  <dl class="detail-list compact-list">
+                    <div><dt>监听地址</dt><dd id="serviceListenValue">—</dd></div>
+                    <div><dt>鉴权令牌</dt><dd id="serviceTokenValue">—</dd></div>
+                    <div><dt>事件队列</dt><dd id="serviceQueueValue">—</dd></div>
+                    <div><dt>PyTorch</dt><dd id="pytorchDependencyValue">—</dd></div>
+                    <div><dt>ONNX Runtime</dt><dd id="onnxDependencyValue">—</dd></div>
+                    <div><dt>AstrBot 集成</dt><dd id="astrbotIntegrationValue">等待心跳</dd></div>
+                    <div><dt>配置应用</dt><dd id="configurationApplyValue">—</dd></div>
+                  </dl>
+                  <div id="configurationRestartNotice" class="inline-alert is-warning" hidden>当前会话继续使用启动时配置，新设置会在重启 Link 后生效</div>
+                </article>
+              </div>
+              <div class="sticky-actions configuration-actions">
+                <span>保存内容不包含密码、API Key 或服务令牌</span>
+                <button id="saveConfigurationButton" class="primary-button" type="submit" disabled>保存配置</button>
+              </div>
+            </fieldset>
+          </form>
+        </section>
+
+        <section id="page-decks" class="page" data-page-panel="decks" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">decks 目录</p>
+              <h2>本地卡组仓库</h2>
+              <p>导入、查看和删除 Link 自己使用的 YDK 卡组，AstrBot 会话临时卡组不会显示在这里</p>
+            </div>
+            <button id="refreshDecksButton" class="secondary-button" type="button">扫描卡组</button>
+          </div>
+
+          <div class="panel-grid deck-management-grid">
+            <form id="localDeckImportForm" class="panel import-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">YDK 文件</p><h2>导入本地卡组</h2></div>
+                <button class="help-button" type="button" aria-label="查看本地卡组导入说明" data-help-title="导入本地卡组" data-help-body="文件会经过 YDK 分区和卡密校验，再规范化保存到 Link 根目录的 decks 文件夹。默认不会覆盖同名文件，只有显式勾选后才允许覆盖">?</button>
+              </div>
+              <label id="ydkDropzone" class="file-dropzone" for="ydkFileInput">
+                <input id="ydkFileInput" type="file" accept=".ydk,text/plain" required>
+                <strong id="ydkFileLabel">选择或拖入 .ydk 卡组</strong>
+                <span>上限 512 KiB，只接受主卡组、额外卡组和副卡组分区</span>
+              </label>
+              <label class="inline-check import-activate"><input id="overwriteDeckInput" type="checkbox"> 确认覆盖同名本地卡组</label>
+              <button id="importDeckButton" class="primary-button full-button" type="submit">验证并导入</button>
+            </form>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">当前选择</p><h2>下次对局卡组</h2></div>
+                <span id="deckCountBadge" class="tag">0 副</span>
+              </div>
+              <div id="selectedDeckSummary" class="selected-model-summary empty-state">连接控制台后读取当前卡组</div>
+              <div class="configuration-note">“设为使用卡组”会更新配置中心并应用到下一次启动，正在使用的卡组不能删除</div>
+            </article>
+          </div>
+
+          <article class="panel repository-panel">
+            <div class="panel-heading">
+              <div><p class="section-kicker">Link 本地文件</p><h2>已导入卡组</h2></div>
+            </div>
+            <div id="localDeckCatalog" class="deck-catalog empty-state">正在扫描本地卡组</div>
+          </article>
+        </section>
+
+        <section id="page-strategy" class="page" data-page-panel="strategy" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">统一控制面</p>
+              <h2>决策策略</h2>
+              <p>Link 未启动时也能修改，设置保存在 link_state.json 并用于后续会话</p>
+            </div>
+            <span id="revisionBadge" class="tag">revision —</span>
+          </div>
+
+          <form id="strategyForm" class="panel-grid strategy-grid">
+            <fieldset id="interventionFieldset" class="panel form-panel" disabled>
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">人工基线</p>
+                  <h2>介入策略</h2>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>运行模式</span>
+                  <select id="modeInput">
+                    <option value="core_only">仅 Core</option>
+                    <option value="hybrid">置信度混合</option>
+                    <option value="llm_review">LLM 全程复核</option>
+                    <option value="llm_only">仅 LLM</option>
+                  </select>
+                  <small>控制每个合法动作时点由谁最终决定</small>
+                </label>
+                <label class="field">
+                  <span class="label-with-help">智能体来源 <button class="help-button" type="button" aria-label="查看智能体来源说明" data-help-title="智能体来源" data-help-body="Link 内置 LLM 使用本机配置的 API；AstrBot 主智能体通过插件事件流接收观察并提交动作。选择 AstrBot 时请确认概览显示插件已连接">?</button></span>
+                  <select id="agentBackendInput">
+                    <option value="local">Link 内置 LLM</option>
+                    <option value="remote_astrbot">AstrBot 主智能体</option>
+                  </select>
+                  <small>决定 llm-only、llm-review 和 hybrid 由哪个智能体处理</small>
+                </label>
+                <label class="field">
+                  <span class="label-with-help">Core 动作策略 <button class="help-button" type="button" aria-label="查看 Core 策略说明" data-help-title="Core 动作策略" data-help-body="Greedy 每次选择分数最高的动作，结果稳定且适合常规对局。Deployment 按动作概率采样，只有选择该模式时 Core 温度才生效">?</button></span>
+                  <select id="corePolicyInput">
+                    <option value="greedy">Greedy 最高分</option>
+                    <option value="deployment">Deployment 温度采样</option>
+                  </select>
+                  <small>Greedy 保持确定性，Deployment 按概率探索</small>
+                </label>
+                <label class="field">
+                  <span class="label-with-help">Core 模型温度 <button class="help-button" type="button" aria-label="查看 Core 温度说明" data-help-title="Core 模型温度" data-help-body="仅 Deployment 策略生效。低于 1 会放大高分动作优势，高于 1 会让低分动作更容易被采样，0.05 接近确定性，通常不建议直接使用很高的值">?</button></span>
+                  <input id="coreTemperatureInput" type="number" min="0.05" max="5" step="0.05">
+                  <small>仅温度采样生效，低温更稳定，高温更随机</small>
+                </label>
+                <label class="field range-field">
+                  <span class="label-with-help">Core 置信度阈值 <button class="help-button" type="button" aria-label="查看 Core 置信度阈值说明" data-help-title="Core 置信度阈值" data-help-body="只在 hybrid 模式决定是否调用 LLM。Core 所选动作概率低于阈值时交给 LLM，调高会增加 LLM 调用和费用，调低会更多信任 Core">?</button> <output id="thresholdOutput">0.65</output></span>
+                  <input id="thresholdInput" type="range" min="0" max="1" step="0.01" value="0.65">
+                  <small>混合模式下低于此值时交给 LLM</small>
+                </label>
+                <label class="field full-field">
+                  <span class="label-with-help">强制 LLM 消息类型 <button class="help-button" type="button" aria-label="查看强制时点说明" data-help-title="强制 LLM 消息类型" data-help-body="填写 OCG 消息编号后，即使 Core 置信度很高，hybrid 模式也会在这些类型的决策时点调用 LLM。不了解协议编号时建议留空">?</button></span>
+                  <input id="forceTypesInput" type="text" inputmode="numeric" placeholder="例如 13, 16, 26">
+                  <small>使用逗号或空格分隔 OCG 消息编号，留空表示不强制</small>
+                </label>
+                <label class="switch-row full-field">
+                  <input id="includeCoreInput" type="checkbox">
+                  <span class="switch-control" aria-hidden="true"></span>
+                  <span><strong>向 LLM 提供 Core 建议</strong><small>让 LLM 在可见状态之外参考 Core 的动作和置信度</small></span>
+                </label>
+                <label class="field">
+                  <span class="label-with-help">LLM 决策总预算 <button class="help-button" type="button" aria-label="查看 LLM 决策总预算说明" data-help-title="LLM 决策总预算" data-help-body="这是游戏每个动作真正等待 LLM 或 AstrBot 的最长时间，默认 12 秒。它包含 AstrBot 等锁、模型生成和工具提交的全部耗时，到期后 Link 会安全回退。修改后会保存到 link_state.json 并覆盖 config.yaml 的同名基线">?</button></span>
+                  <div class="input-suffix"><input id="timeBudgetInput" type="number" min="0.1" step="0.1"><span>秒</span></div>
+                  <small>真正控制游戏内超时，AstrBot 接管时同样生效</small>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset id="autonomyFieldset" class="panel form-panel" disabled>
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">临时覆盖</p>
+                  <h2 class="label-with-help">LLM 自主调整 <button class="help-button" type="button" aria-label="查看 LLM 自主调整说明" data-help-title="LLM 自主调整" data-help-body="开启后，LLM 可以随一次正常动作建议临时修改后续介入模式、Core 阈值或强制时点。修改受到本页护栏限制，到期自动恢复人工基线，不会无限续期">?</button></h2>
+                </div>
+              </div>
+              <label class="switch-row emphasized-switch">
+                <input id="autonomyEnabledInput" type="checkbox">
+                <span class="switch-control" aria-hidden="true"></span>
+                <span><strong>允许自主调整</strong><small>LLM 可在安全边界内短暂改变后续介入方式</small></span>
+              </label>
+              <div class="form-grid">
+                <div class="field full-field">
+                  <span class="label-with-help">允许的模式 <button class="help-button" type="button" aria-label="查看允许模式说明" data-help-title="允许的模式" data-help-body="限制 LLM 临时切换到哪些介入模式。取消某个选项后，LLM 提议该模式会被拒绝并记录 ignored 事件">?</button></span>
+                  <div class="check-grid">
+                    <label><input type="checkbox" name="autonomyMode" value="core_only"> 仅 Core</label>
+                    <label><input type="checkbox" name="autonomyMode" value="hybrid"> 混合</label>
+                    <label><input type="checkbox" name="autonomyMode" value="llm_review"> LLM 复核</label>
+                    <label><input type="checkbox" name="autonomyMode" value="llm_only"> 仅 LLM</label>
+                  </div>
+                </div>
+                <label class="field"><span class="label-with-help">最低置信度 <button class="help-button" type="button" aria-label="查看最低置信度说明" data-help-title="自主阈值下限" data-help-body="这是 LLM 可以设置的 Core 介入阈值下限，不是胜率。设置为 0.2 表示拒绝 LLM 把 hybrid 阈值降到 0.2 以下，避免它让 Core 过度接管">?</button></span><input id="autonomyMinInput" type="number" min="0" max="1" step="0.01"><small>限制 LLM 可设置阈值的下界</small></label>
+                <label class="field"><span class="label-with-help">最高置信度 <button class="help-button" type="button" aria-label="查看最高置信度说明" data-help-title="自主阈值上限" data-help-body="这是 LLM 可以设置的 Core 介入阈值上限。设置为 0.9 表示拒绝高于 0.9 的提议，避免几乎所有 hybrid 时点都调用 LLM">?</button></span><input id="autonomyMaxInput" type="number" min="0" max="1" step="0.01"><small>限制 LLM 可设置阈值的上界</small></label>
+                <label class="field"><span class="label-with-help">最长持续决策数 <button class="help-button" type="button" aria-label="查看 TTL 说明" data-help-title="最长持续决策数" data-help-body="一次自主调整最多影响多少个后续合法动作提交。每提交一次动作减一，到零立即恢复人工基线；它不是回合数或秒数">?</button></span><input id="autonomyTtlInput" type="number" min="1" step="1"><small>按动作提交次数计算，不按回合计算</small></label>
+                <label class="field"><span class="label-with-help">最多强制时点数 <button class="help-button" type="button" aria-label="查看强制时点上限说明" data-help-title="最多强制时点数" data-help-body="限制一次自主建议能提交多少个强制 LLM 的 OCG 消息编号。设为 0 会禁止 LLM 临时增加强制时点，但仍可调整模式和阈值">?</button></span><input id="autonomyForceLimitInput" type="number" min="0" step="1"><small>0 表示禁止 LLM 增加强制时点</small></label>
+              </div>
+              <div class="override-box">
+                <span>当前自主覆盖</span>
+                <code id="activeOverrideValue">无</code>
+              </div>
+            </fieldset>
+
+            <div class="sticky-actions">
+              <span id="strategySaveHint">连接控制台后可编辑</span>
+              <button id="saveStrategyButton" class="primary-button" type="submit" disabled>保存策略</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="page-models" class="page" data-page-panel="models" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">模型协议 V3</p>
+              <h2>模型仓库</h2>
+              <p>导入 Core 生成的 GKG 部署包，选择下次 Link 会话加载的 PTH 或 ONNX 模型</p>
+            </div>
+            <button id="refreshModelsButton" class="secondary-button" type="button">扫描仓库</button>
+          </div>
+
+          <div class="panel-grid model-management-grid">
+            <article class="panel selected-model-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">当前选择</p><h2>下次会话模型</h2></div>
+                <span id="modelSelectionRevision" class="tag">revision —</span>
+              </div>
+              <div id="selectedModelSummary" class="selected-model-summary empty-state">正在读取模型选择</div>
+              <div id="modelRestartNotice" class="inline-alert is-warning" hidden>当前会话继续使用已加载模型，新选择将在重启 Link 后生效</div>
+            </article>
+
+            <form id="gkgImportForm" class="panel import-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">部署包格式 2</p><h2>导入 GKG</h2></div>
+              </div>
+              <label id="gkgDropzone" class="file-dropzone" for="gkgFileInput">
+                <input id="gkgFileInput" type="file" accept=".gkg" required>
+                <strong id="gkgFileLabel">选择 .gkg 部署包</strong>
+                <span>上传会采用流式暂存，验证模型身份和语义资产后再安装</span>
+              </label>
+              <label class="inline-check import-activate"><input id="activateImportedModel" type="checkbox" checked> 导入后自动选择最新的 ONNX 模型</label>
+              <button id="importGkgButton" class="primary-button full-button" type="submit">验证并导入</button>
+            </form>
+          </div>
+
+          <article class="panel repository-panel">
+            <div class="panel-heading">
+              <div><p class="section-kicker">models 目录</p><h2>已安装模型</h2></div>
+              <span id="modelCountBadge" class="tag">0 个</span>
+            </div>
+            <div id="modelCatalog" class="model-catalog empty-state">正在扫描模型仓库</div>
+          </article>
+
+          <div class="panel-grid repository-footer-grid">
+            <article class="panel local-package-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">deploy_packages 目录</p><h2>本地部署包</h2></div>
+              </div>
+              <p class="panel-description">大文件可以直接放入该目录，避免浏览器重复传输</p>
+              <div class="button-row">
+                <select id="localPackageInput" aria-label="本地 GKG 部署包"><option value="">没有可用部署包</option></select>
+                <button id="importLocalPackageButton" class="secondary-button" type="button" disabled>导入所选包</button>
+              </div>
+            </article>
+            <details class="panel invalid-model-panel">
+              <summary>无法识别的模型制品 <span id="invalidModelCount">0</span></summary>
+              <div id="invalidModelList" class="invalid-list empty-state">没有发现无效制品</div>
+            </details>
+          </div>
+        </section>
+
+        <section id="page-assets" class="page" data-page-panel="assets" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">模型协议 V3 配套数据</p>
+              <h2>运行资产</h2>
+              <p>管理 CDB、官方 Lua 脚本、完整语义资产和 MSG 142 宣言兜底池</p>
+            </div>
+            <button id="refreshAssetsButton" class="secondary-button" type="button">刷新资产</button>
+          </div>
+
+          <div class="panel-grid model-management-grid">
+            <article class="panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">当前模型路径</p><h2>资产状态</h2></div>
+                <span id="semanticStateBadge" class="status-pill is-neutral">读取中</span>
+              </div>
+              <dl class="detail-list compact-list">
+                <div><dt>资产目录</dt><dd id="assetPathValue">—</dd></div>
+                <div><dt>卡库卡片数</dt><dd id="assetCardCountValue">—</dd></div>
+                <div><dt>Lua 脚本数</dt><dd id="assetScriptCountValue">—</dd></div>
+                <div><dt>语义资产</dt><dd id="assetSemanticValue">—</dd></div>
+                <div><dt>本机构建依赖</dt><dd id="assetBuilderValue">—</dd></div>
+                <div><dt>142 兜底卡数</dt><dd id="assetStapleCountValue">—</dd></div>
+              </dl>
+              <div class="configuration-note">更新后请重启 Link 会话，正在对局时会拒绝替换卡库和语义资产</div>
+            </article>
+
+            <article class="panel form-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">萌卡与官方脚本库</p><h2>CDB 与 Lua 更新</h2></div>
+                <button class="help-button" type="button" aria-label="查看卡库更新说明" data-help-title="CDB 与 Lua 更新" data-help-body="下载萌卡简体中文 cards.cdb，并同步 YGOPro 官方 Lua 脚本。更新前会验证 CDB 结构，下载和解包在后台线程执行，不阻塞正在运行的 Web 服务">?</button>
+              </div>
+              <div class="form-grid">
+                <label class="field full-field"><span>CDB 地址</span><input id="assetCdbUrlInput" type="url"></label>
+                <label class="field full-field"><span>脚本仓库地址</span><input id="assetScriptRepoInput" type="url"></label>
+                <label class="switch-row full-field"><input id="assetForceScriptsInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>完全替换脚本目录</strong><small>关闭时保留本地额外脚本并覆盖同名官方脚本</small></span></label>
+              </div>
+              <button id="syncCardDataButton" class="primary-button full-button" type="button">同步 CDB 与脚本</button>
+            </article>
+
+            <article class="panel form-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">发布资产同步</p><h2>语义化更新</h2></div>
+                <button class="help-button" type="button" aria-label="查看语义同步说明" data-help-title="语义化更新" data-help-body="从同一远程目录下载 knowledge_base、代码语义向量与索引，完整交叉校验后安装到当前模型资产目录。该入口不会在 Link 运行进程中加载训练依赖重新编码向量">?</button>
+              </div>
+              <label class="field"><span>知识库基准地址</span><input id="assetSemanticUrlInput" type="url"></label>
+              <button id="syncSemanticsButton" class="primary-button full-button" type="button">同步完整语义资产</button>
+              <div class="configuration-note">上方只下载已发布成品，不需要深度学习依赖</div>
+              <label class="field"><span>本机构建方式</span><select id="semanticBuildModeInput"><option value="local_incremental">基于当前资产增量解析</option><option value="remote_incremental">先同步远端基座再增量解析</option><option value="full_local">忽略旧资产完全重建</option></select></label>
+              <button id="rebuildSemanticsButton" class="secondary-button full-button" type="button">本机解析 Lua 并生成向量</button>
+              <div class="configuration-note">本机构建按需加载 Torch 与 Sentence Transformers，缺少时可安装 requirements-semantic.txt</div>
+            </article>
+
+            <article class="panel form-panel">
+              <div class="panel-heading">
+                <div><p class="section-kicker">MSG 142</p><h2>宣言兜底池</h2></div>
+                <button class="help-button" type="button" aria-label="查看 142 兜底池说明" data-help-title="MSG 142 宣言兜底池" data-help-body="当服务器要求按复杂条件宣言卡名时，Link 会把这里的卡加入候选池。它不是额外卡组，也不会改变实际对战卡组内容">?</button>
+              </div>
+              <div id="metaStaplesList" class="invalid-list empty-state">正在读取兜底池</div>
+              <div class="form-grid">
+                <label class="field"><span>操作</span><select id="metaStaplesOperationInput"><option value="add">添加</option><option value="remove">移除</option><option value="replace">完全替换</option></select></label>
+                <label class="field"><span>卡密</span><input id="metaStaplesCodesInput" type="text" placeholder="多个卡密用空格或逗号分隔"></label>
+              </div>
+              <button id="updateMetaStaplesButton" class="secondary-button full-button" type="button">应用兜底池调整</button>
+            </article>
+          </div>
+        </section>
+
+        <section id="page-chat" class="page" data-page-panel="chat" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">反向接口</p>
+              <h2>游戏聊天</h2>
+              <p>Link 只负责游戏内消息，QQ 等平台会话由 AstrBot 插件管理</p>
+            </div>
+            <button id="refreshChatButton" class="secondary-button" type="button">刷新记录</button>
+          </div>
+
+          <div class="chat-layout">
+            <article class="panel chat-console">
+              <div class="panel-heading">
+                <div><p class="section-kicker">对局消息</p><h2>聊天记录</h2></div>
+                <span id="chatHistoryCount" class="tag">0 条</span>
+              </div>
+              <div id="chatHistory" class="chat-history empty-state">启动 Link 后可读取聊天记录</div>
+              <form id="chatSendForm" class="chat-composer">
+                <label class="sr-only" for="chatInput">游戏内聊天内容</label>
+                <textarea id="chatInput" rows="2" placeholder="输入游戏内消息，Enter 发送，Shift + Enter 换行" disabled></textarea>
+                <div class="composer-footer">
+                  <span id="chatLength">0 / 120 UTF-16</span>
+                  <button id="sendChatButton" class="primary-button" type="submit" disabled>发送</button>
+                </div>
+              </form>
+            </article>
+
+            <form id="chatSettingsForm" class="panel form-panel chat-settings">
+              <div class="panel-heading">
+                <div><p class="section-kicker">持久化控制</p><h2>聊天设置</h2></div>
+              </div>
+              <fieldset id="chatFieldset" disabled>
+                <label class="switch-row"><input id="chatEnabledInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>启用聊天模块</strong><small>聊天功能的总开关</small></span></label>
+                <label class="switch-row"><input id="captureIncomingInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>记录收到的消息</strong><small>写入当前对局内存历史</small></span></label>
+                <label class="switch-row"><input id="sendEnabledInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>允许发送消息</strong><small>开放 WebUI 与外部接口发送能力</small></span></label>
+                <label class="switch-row"><input id="includeChatContextInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>加入 LLM 上下文</strong><small>下一次动作决策会看到近期聊天</small></span></label>
+                <label class="switch-row"><input id="chatSuggestionsInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>允许 LLM 建议回复</strong><small>建议默认只记录为事件</small></span></label>
+                <label class="switch-row"><input id="autoSendChatInput" type="checkbox"><span class="switch-control" aria-hidden="true"></span><span><strong>自动发送 LLM 回复</strong><small>开启后仍受频率和长度限制</small></span></label>
+                <div class="form-grid chat-limit-grid">
+                  <label class="field"><span>上下文消息数</span><input id="contextMessagesInput" type="number" min="1" max="100" step="1"></label>
+                  <label class="field"><span>上下文字数</span><input id="contextCharsInput" type="number" min="1" step="1"></label>
+                  <label class="field"><span>发送长度上限</span><input id="outboundLimitInput" type="number" min="1" step="1"></label>
+                  <label class="field"><span>自动发送间隔</span><div class="input-suffix"><input id="autoSendIntervalInput" type="number" min="0" step="0.1"><span>秒</span></div></label>
+                </div>
+              </fieldset>
+              <button id="saveChatSettingsButton" class="primary-button full-button" type="submit" disabled>保存聊天设置</button>
+            </form>
+          </div>
+        </section>
+
+        <section id="page-observation" class="page" data-page-panel="observation" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">玩家可见数据</p>
+              <h2>最近一次 LLM 观察</h2>
+              <p>这里展示真正送给 LLM 的标准化可见信息，可用于核对判断依据</p>
+            </div>
+            <div class="button-row compact-buttons">
+              <label class="inline-check"><input id="observationAutoRefresh" type="checkbox" checked> 随事件刷新</label>
+              <button id="refreshObservationButton" class="secondary-button" type="button">读取最新</button>
+              <button id="copyObservationButton" class="secondary-button" type="button">复制</button>
+              <button id="downloadObservationButton" class="secondary-button" type="button">导出</button>
+            </div>
+          </div>
+          <article class="panel observation-panel">
+            <div id="observationSummary" class="summary-strip">
+              <span>尚未读取观察</span>
+            </div>
+            <pre id="observationData" class="json-view">启动 Link 后点击“读取最新”</pre>
+          </article>
+        </section>
+
+        <section id="page-events" class="page" data-page-panel="events" hidden>
+          <div class="page-intro">
+            <div>
+              <p class="section-kicker">WebSocket 事件流</p>
+              <h2>事件与诊断</h2>
+              <p>浏览、筛选和导出最近 300 条结构化事件</p>
+            </div>
+          </div>
+
+          <div class="diagnostic-grid">
+            <article class="mini-panel"><span>API 版本</span><strong id="apiVersionValue">—</strong></article>
+            <article class="mini-panel"><span>WebSocket</span><strong id="websocketValue">未连接</strong></article>
+            <article class="mini-panel"><span>最近请求</span><strong id="latencyValue">—</strong></article>
+            <article class="mini-panel"><span>推理依赖</span><strong id="backendValue">正在检测</strong></article>
+          </div>
+
+          <article class="panel events-panel">
+            <div class="event-toolbar">
+              <div class="event-filters">
+                <input id="eventSearchInput" type="search" placeholder="搜索事件类型或内容">
+                <select id="eventCategoryInput" aria-label="事件分类">
+                  <option value="all">全部分类</option>
+                  <option value="service">服务</option>
+                  <option value="connection">连接</option>
+                  <option value="duel">对局</option>
+                  <option value="decision">决策</option>
+                  <option value="chat">聊天</option>
+                  <option value="runtime">控制面</option>
+                  <option value="other">其他</option>
+                </select>
+              </div>
+              <div class="button-row compact-buttons">
+                <button id="pauseEventsButton" class="secondary-button" type="button">暂停滚动</button>
+                <button id="clearEventsButton" class="secondary-button" type="button">清空</button>
+                <button id="exportEventsButton" class="secondary-button" type="button">导出 JSON</button>
+              </div>
+            </div>
+            <div id="eventList" class="event-list empty-state">连接控制台后会在这里显示实时事件</div>
+          </article>
+
+          <details class="panel raw-details">
+            <summary>服务能力与原始状态</summary>
+            <div class="raw-grid">
+              <div><h3>Capabilities</h3><pre id="capabilitiesData" class="json-view small-json">尚未检测</pre></div>
+              <div><h3>Status</h3><pre id="rawStatusData" class="json-view small-json">尚未连接</pre></div>
+            </div>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="deckEditorDialog" class="help-dialog deck-editor-dialog" aria-labelledby="deckEditorTitle">
+    <div class="help-dialog-heading">
+      <div><p class="section-kicker">单卡调整</p><h2 id="deckEditorTitle">编辑本地卡组</h2></div>
+      <button id="closeDeckEditorButton" class="quiet-button dialog-close-button" type="button" aria-label="关闭卡组编辑">关闭</button>
+    </div>
+    <p id="deckEditorSummary">选择增添、移除或移动卡片，修改会直接保存到本地 YDK</p>
+    <div id="deckEditorContents" class="deck-editor-contents"></div>
+    <form id="deckEditorForm" class="deck-editor-form">
+      <div class="form-grid">
+        <label class="field"><span>操作</span><select id="deckOperationInput"><option value="add">增添</option><option value="remove">移除</option><option value="move">移动区域</option></select></label>
+        <label class="field"><span>卡密</span><input id="deckCardCodeInput" type="text" inputmode="numeric" pattern="[0-9]+" required placeholder="输入数字卡密"></label>
+        <label class="field"><span>所在或加入区域</span><select id="deckSectionInput"><option value="main">主卡组</option><option value="extra">额外卡组</option><option value="side">副卡组</option></select></label>
+        <label id="deckTargetSectionField" class="field"><span>移动到</span><select id="deckTargetSectionInput"><option value="main">主卡组</option><option value="extra">额外卡组</option><option value="side">副卡组</option></select></label>
+        <label class="field"><span>数量</span><input id="deckCardCountInput" type="number" min="1" max="3" step="1" value="1" required></label>
+      </div>
+      <div class="configuration-note">每次提交后都会重新校验分区与安全数量上限，对局运行中不能修改</div>
+      <button id="applyDeckEditButton" class="primary-button full-button" type="submit">应用单卡修改</button>
+    </form>
+  </dialog>
+  <dialog id="helpDialog" class="help-dialog" aria-labelledby="helpDialogTitle">
+    <div class="help-dialog-heading">
+      <div><p class="section-kicker">参数说明</p><h2 id="helpDialogTitle">详细说明</h2></div>
+      <button id="closeHelpDialogButton" class="quiet-button dialog-close-button" type="button" aria-label="关闭说明">关闭</button>
+    </div>
+    <p id="helpDialogBody"></p>
+  </dialog>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

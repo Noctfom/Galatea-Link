@@ -1,5 +1,43 @@
 from dataclasses import dataclass, field
-from typing import List
+from enum import IntEnum
+from typing import List, Optional
+
+
+# 模型动作协议固定维度
+ACTION_TARGET_SLOTS = 5
+ACTION_OPERATION_COUNT = 32
+ACTION_RESPONSE_BUCKETS = 512
+ACTION_SIGNATURE_BYTES = 4
+ACTION_CONTEXT_DIM = 6
+CHAIN_CONTEXT_DIM = 9
+
+
+class ActionOperation(IntEnum):
+    """标记同一引擎消息内部的真实操作语义"""
+
+    DEFAULT = 0
+    YES = 1
+    NO = 2
+    OPTION = 3
+    SELECT = 4
+    UNSELECT = 5
+    FINISH = 6
+    CANCEL = 7
+    POSITION_ATTACK = 8
+    POSITION_ATTACK_DOWN = 9
+    POSITION_DEFENSE = 10
+    POSITION_SET = 11
+    SHUFFLE = 12
+    DIRECT_ATTACK = 13
+    ATTACK = 14
+    ACTIVATE = 15
+    CHAIN = 16
+    PHASE = 17
+    PLACE = 18
+    ANNOUNCE = 19
+    MACRO_SELECT = 20
+    MACRO_SORT = 21
+    REMOVE_COUNTER = 22
 
 # ==========================================
 #  Galatea AI 数据协议定义 (Schema V2.0)
@@ -12,7 +50,7 @@ class GlobalFeature:
     phase_id: int         # 当前阶段ID
     to_play: int          # 当前行动玩家 (0或1)
     
-    # 核心资源
+    # 核心资源使用固定座位顺序并由编码器转换为行动方视角
     my_lp: int
     op_lp: int
     
@@ -67,6 +105,7 @@ class CardEntity:
     equipped_by_entity_indices: List[int] = field(default_factory=list)
     target_entity_indices: List[int] = field(default_factory=list)
     targeted_by_entity_indices: List[int] = field(default_factory=list)
+    used_effect_mask: int = 0    # 已经发动过的效果位掩码
 
 @dataclass
 class GameAction:
@@ -85,11 +124,31 @@ class GameAction:
     desc_str: str = ""
 
     desc_id: int = 0      # 效果ID，用于区分同一张卡的不同效果
+    effect_slot: int = -1 # Lua 代码语义槽
+
+    # 模型协议 V3 使用的显式动作语义
+    code: int = 0
+    operation_id: int = int(ActionOperation.DEFAULT)
+    response_value: Optional[int] = None
+    target_location_raw: int = -1
+    selection_min: int = 0
+    selection_max: int = 0
+    selection_count: int = 0
+    finishable: bool = False
+    cancelable: bool = False
+    context_value: int = 0
+    prompt_flags: int = 0
+    prompt_value: int = 0
+    prompt_value2: int = 0
 
     # [合法化] 宏动作专属属性 (默认为 None，兼容单卡逻辑)
     macro_targets: list = None
     macro_places: list = None
+    macro_target_codes: list = None
+    macro_target_values: list = None
+    macro_target_locations: list = None
     decision_bytes: bytes = b''
+    decision_value: Optional[int] = None
 
 @dataclass
 class GameSnapshot:

@@ -3,75 +3,166 @@
 #  修复了导致死锁的索引映射问题
 # ==================================================================================
 
-import torch
-import torch.nn as nn
+import numpy as np
 import os
 import random
 import struct
+import sys
 from dataclasses import dataclass
 from typing import Any
-# 引入桥接后的 FeatureEncoder
-try:
-    from feature_encoder import GalateaEncoder as FeatureEncoder
-except ImportError:
-    # 兼容旧代码或测试环境
-    from galatea_net import FeatureEncoder 
+from model_protocols import load_model_backend
 
-from galatea_net import GalateaNet
+
+# 安全输出模型日志并兼容 Windows 控制台编码
+def _console_print(message):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+        safe_message = message.encode(encoding, errors='replace').decode(encoding)
+        print(safe_message)
 
 
 @dataclass(frozen=True)
 class CoreDecision:
+    """保存 Core 动作及其介入策略概率信息"""
+
     choice_id: int
     action: Any
     response: Any
     confidence: float
     probability_margin: float
+    policy_mode: str = "greedy"
+    temperature: float | None = None
 
 class AiBot:
-    def __init__(self, device='cpu', net_config=None):
+    def __init__(self, device='cpu', net_config=None, initialize_network=True):
+        """初始化 AI 控制器并允许延迟构建推理网络"""
         if net_config is None:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
-            
-        self.net = GalateaNet(net_config).to(device)
-        self.device = device
-        self.encoder = FeatureEncoder()
-        self.net.eval() # 默认推理模式
 
-    def load_model(self, path):
+        self.net = None
+        self.inference_runtime = None
+        self.device = device
+        self.encoder = None
+        self.model_metadata = None
+        self.adapter_id = "core-3.4.2-model-v1"
+        self.model_protocol_version = 1
+        self.max_actions = 80
+        self._rng = np.random.default_rng()
+        if initialize_network:
+            from feature_encoder import GalateaEncoder as FeatureEncoder
+            from galatea_net import GalateaNet
+            from model_protocols.inference_runtime import PyTorchInferenceRuntime
+
+            self.net = GalateaNet(net_config).to(device)
+            self.net.eval() # 默认推理模式
+            self.encoder = FeatureEncoder()
+            self.inference_runtime = PyTorchInferenceRuntime(self.net, device)
+
+    # 自动识别并严格加载已注册的 Core 模型协议
+    def load_model(
+        self,
+        path,
+        expected_model_id=None,
+        *,
+        protocol="auto",
+        asset_path=None,
+        strict_asset_hashes=True,
+        inference_backend="auto",
+        onnx_providers=("CPUExecutionProvider",),
+        onnx_intra_op_threads=0,
+    ):
         if not os.path.exists(path):
-            print(f"⚠️ 模型文件不存在: {path}")
+            _console_print(f"⚠️ 模型文件不存在: {path}")
+            self.net = None
+            self.inference_runtime = None
             return False
-        
+
         try:
-            checkpoint = torch.load(path, map_location=self.device)
-            
-            # [新逻辑] 检查是否包含配置字典
-            if isinstance(checkpoint, dict) and 'net_config' in checkpoint:
-                saved_config = checkpoint['net_config']
-                print(f"📦 发现内嵌配置: {saved_config}")
-                self.net = GalateaNet(saved_config).to(self.device)
-                self.net.load_state_dict(checkpoint['model_state_dict'])
-                self.net.eval()
-                print(f"✅ 网络已自动重构并加载权重。")
-                return True
-            
-            # [旧逻辑]
-            elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                 self.net.load_state_dict(checkpoint['model_state_dict'])
-                 return True
-            else:
-                self.net.load_state_dict(checkpoint)
-                return True
+            backend = load_model_backend(
+                path,
+                device=self.device,
+                expected_model_id=expected_model_id,
+                protocol=protocol,
+                asset_path=asset_path,
+                strict_asset_hashes=strict_asset_hashes,
+                inference_backend=inference_backend,
+                onnx_providers=tuple(onnx_providers),
+                onnx_intra_op_threads=onnx_intra_op_threads,
+            )
+            self.net = backend.net
+            self.inference_runtime = backend.inference_runtime
+            self.encoder = backend.encoder
+            self.model_metadata = backend.metadata
+            self.adapter_id = backend.adapter_id
+            self.model_protocol_version = backend.metadata["model_protocol_version"]
+            self.max_actions = backend.max_actions
+            _console_print(
+                "✅ Core 模型已按版本适配器加载 "
+                f"adapter={backend.adapter_id} "
+                f"model_id={backend.metadata['model_id']} "
+                f"iteration={backend.metadata['iteration']} "
+                f"runtime={backend.runtime_id}"
+            )
+            return True
 
         except Exception as e:
-            print(f"❌ 加载模型失败: {e}")
+            _console_print(f"❌ 加载模型失败: {e}")
+            self.net = None
+            self.inference_runtime = None
+            self.model_metadata = None
             return False
+
+    # 返回本地 Core 模型是否可以安全参与决策
+    @property
+    def model_available(self):
+        return (
+            getattr(self, "inference_runtime", None) is not None
+            or getattr(self, "net", None) is not None
+        )
+
+    # 通过统一运行时执行推理并兼容旧测试网络
+    def _infer(self, observation):
+        runtime = getattr(self, "inference_runtime", None)
+        if runtime is not None:
+            return runtime.infer(observation)
+        if self.net is None:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
+        import torch
+
+        self.net.eval()
+        with torch.no_grad():
+            device_inputs = {
+                key: value.to(self.device)
+                for key, value in observation.items()
+            }
+            logits, values, value_input = self.net(device_inputs)
+        return (
+            logits.detach().cpu().numpy(),
+            values.detach().cpu().numpy(),
+            value_input,
+        )
+
+    # 计算数值稳定的单批次 softmax 概率
+    @staticmethod
+    def _softmax(values):
+        scores = np.asarray(values, dtype=np.float64)
+        scores = scores - np.max(scores)
+        exponentials = np.exp(scores)
+        total = exponentials.sum()
+        if not np.isfinite(total) or total <= 0:
+            raise RuntimeError("模型动作分数无法转换为有效概率")
+        return exponentials / total
 
     def get_action_and_value_from_tensor(self, obs_dict, valid_actions_list=None):
         """
         [训练专用 - Action Head版] 获取动作概率和价值
         """
+        if self.net is None:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
+        import torch
+
         # 1. 前向传播
         # logits: [B, MAX_ACTIONS] (已在网络内部Mask，无效动作是 -1e9)
         # value:  [B, 1]
@@ -89,6 +180,8 @@ class AiBot:
         return action, dist.log_prob(action), dist.entropy().mean(), value, v_input
 
     def get_decision(self, gamestate, msg_type, msg_args=None):
+        if not self.model_available:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
         snap = gamestate.get_snapshot(self.env)
         return self.get_decision_from_snapshot(snap, msg_type, msg_args)
 
@@ -98,30 +191,66 @@ class AiBot:
         return decision.response if decision is not None else None
 
     # 计算 Core 动作及用于介入策略的概率信息
-    def get_scored_decision_from_snapshot(self, snap, msg_type, msg_args=None):
-        self.net.eval()
+    def get_scored_decision_from_snapshot(
+        self,
+        snap,
+        msg_type,
+        msg_args=None,
+        *,
+        policy_mode="greedy",
+        temperature=0.8,
+    ):
+        """按所选 Core 策略返回动作、置信度和协议响应"""
+        if not self.model_available:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
+        if self.net is not None:
+            self.net.eval()
         if not snap.valid_actions or not snap.entities:
             return None
 
-        tensor_dict = self.encoder.encode(snap, player_id=snap.global_data.to_play)
-        
-        with torch.no_grad():
-            gpu_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
-            
-            # Logits 现在直接就是 [1, 80] 的动作分数
-            logits, value, _ = self.net(gpu_dict) 
-            
-            # 网络已经内置了 act_mask 并把无效槽位变成了 -1e9
-            # 不需要手动切片，直接 Argmax，不可能选到 Padding
-            valid_logits = logits[0][:len(snap.valid_actions)]
-            probabilities = torch.softmax(valid_logits, dim=-1)
-            sel_idx = torch.argmax(probabilities).item()
-            confidence = float(probabilities[sel_idx].item())
-            if len(snap.valid_actions) > 1:
-                top_two = torch.topk(probabilities, k=2).values
-                probability_margin = float((top_two[0] - top_two[1]).item())
-            else:
-                probability_margin = 1.0
+        runtime = getattr(self, "inference_runtime", None)
+        output_format = (
+            "numpy"
+            if getattr(runtime, "runtime_id", None) == "onnxruntime"
+            else "torch"
+        )
+        try:
+            tensor_dict = self.encoder.encode(
+                snap,
+                player_id=snap.global_data.to_play,
+                output_format=output_format,
+            )
+        except TypeError:
+            tensor_dict = self.encoder.encode(
+                snap,
+                player_id=snap.global_data.to_play,
+            )
+        logits, _, _ = self._infer(tensor_dict)
+
+        # 网络已经内置 act_mask 并把无效槽位变成极小值
+        valid_logits = np.asarray(logits)[0, :len(snap.valid_actions)]
+        normalized_policy = str(policy_mode).strip().casefold()
+        if normalized_policy not in {"greedy", "deployment"}:
+            raise ValueError(f"不支持的 Core 动作策略: {policy_mode}")
+        normalized_temperature = float(temperature)
+        if not 0.05 <= normalized_temperature <= 5.0:
+            raise ValueError("Core 模型温度必须位于 0.05 到 5.0")
+        if normalized_policy == "deployment":
+            probabilities = self._softmax(valid_logits / normalized_temperature)
+            rng = getattr(self, "_rng", None)
+            if rng is None:
+                rng = np.random.default_rng()
+                self._rng = rng
+            sel_idx = int(rng.choice(len(probabilities), p=probabilities))
+        else:
+            probabilities = self._softmax(valid_logits)
+            sel_idx = int(np.argmax(probabilities))
+        confidence = float(probabilities[sel_idx])
+        if len(snap.valid_actions) > 1:
+            top_two = np.partition(probabilities, -2)[-2:]
+            probability_margin = float(top_two.max() - top_two.min())
+        else:
+            probability_margin = 1.0
 
         chosen = snap.valid_actions[sel_idx]
         response = self._pack_response(chosen, msg_type, msg_args)
@@ -131,7 +260,43 @@ class AiBot:
             response=response,
             confidence=confidence,
             probability_margin=probability_margin,
+            policy_mode=normalized_policy,
+            temperature=(
+                normalized_temperature
+                if normalized_policy == "deployment"
+                else None
+            ),
         )
+
+    # 计算基础动作概率供复杂宏动作候选池进行两阶段筛选
+    def get_action_probabilities_from_snapshot(self, snap):
+        if not self.model_available:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
+        if not snap.valid_actions or not snap.entities:
+            return []
+
+        if self.net is not None:
+            self.net.eval()
+        runtime = getattr(self, "inference_runtime", None)
+        output_format = (
+            "numpy"
+            if getattr(runtime, "runtime_id", None) == "onnxruntime"
+            else "torch"
+        )
+        try:
+            tensor_dict = self.encoder.encode(
+                snap,
+                player_id=snap.global_data.to_play,
+                output_format=output_format,
+            )
+        except TypeError:
+            tensor_dict = self.encoder.encode(
+                snap,
+                player_id=snap.global_data.to_play,
+            )
+        logits, _, _ = self._infer(tensor_dict)
+        valid_count = min(len(snap.valid_actions), logits.shape[-1])
+        return self._softmax(np.asarray(logits)[0, :valid_count])
 
     # 将 LLM 返回的合法 choice_id 转换为游戏协议响应
     def pack_choice_from_snapshot(self, snap, choice_id, msg_type, msg_args=None):
@@ -148,6 +313,8 @@ class AiBot:
         # ==========================================================
         if hasattr(action, 'decision_bytes') and action.decision_bytes:
             return action.decision_bytes
+        if getattr(action, 'decision_value', None) is not None:
+            return int(action.decision_value)
         # ==========================================================
         # 1. 整型槽类 (调用 C++ set_responsei) - 绝对不能返回 bytes
         # 包含: 10(Battle), 11(Idle), 12(EffectYN), 13(YesNo), 

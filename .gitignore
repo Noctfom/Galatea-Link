@@ -1,8 +1,69 @@
+# Python 缓存和测试产物
 __pycache__/
-.vscode/
-ygopro-core-master/
-decks/
-models/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 本地虚拟环境和编辑器设置
 .venv/
-tests/
-config.yaml
+venv/
+env/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 本机配置、密钥和环境变量
+/config.yaml
+/config.*.yaml
+!/config.example.yaml
+.env
+.env.*
+!.env.example
+/link_state.json
+/link_secrets.json
+*.secrets.json
+credentials*.json
+*_credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 日志、崩溃转储和临时文件
+*.log
+logs/
+*.dump
+*.dmp
+*.tmp
+*.temp
+.browser*/
+
+# 用户卡组、会话导入和 AstrBot 运行数据
+/decks/
+/data/
+
+# 本地模型、运行资产和部署包
+/models/
+/model_assets/
+/deploy_packages/
+*.gkg
+*.onnx
+*.onnx.data
+*.pth
+*.pt
+/code_embeddings.npy
+/code_embeddings_idx.json
+
+# 只读上游源码镜像
+/ygopro-core-master/
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -3,6 +3,8 @@ import struct
 import sys
 import traceback
 
+from core.game_chat import CTOS_CHAT, encode_ctos_chat_payload
+
 # === YGOPro / MDPro 核心网络指令常量 ===
 CTOS_RESPONSE     = 0x01
 CTOS_UPDATE_DECK  = 0x02  
@@ -14,7 +16,8 @@ CTOS_CREATE_GAME  = 0x11
 CTOS_JOIN_GAME    = 0x12
 CTOS_LEAVE_GAME   = 0x13
 CTOS_SURRENDER    = 0x14
-CTOS_HS_READY     = 0x22  
+CTOS_HS_READY     = 0x22
+CTOS_HS_START     = 0x25
 
 STOC_GAME_MSG     = 0x01
 STOC_ERROR_MSG    = 0x02
@@ -25,6 +28,23 @@ STOC_JOIN_GAME    = 0x12  # <--- 修复：加入游戏是 0x12
 STOC_TYPE_CHANGE  = 0x13  # <--- 修复：分配座位是 0x13
 STOC_DUEL_START   = 0x15  # <--- 修复：决斗开始是 0x15
 STOC_DUEL_END     = 0x16  # <--- 修复：决斗结束是 0x16
+STOC_TIME_LIMIT   = 0x18
+STOC_HS_PLAYER_ENTER  = 0x20
+STOC_HS_PLAYER_CHANGE = 0x21
+STOC_HS_WATCH_CHANGE  = 0x22
+
+PLAYERCHANGE_OBSERVE = 0x08
+PLAYERCHANGE_READY = 0x09
+PLAYERCHANGE_NOTREADY = 0x0A
+PLAYERCHANGE_LEAVE = 0x0B
+
+WIN_REASON_NAMES = {
+    0x00: "投降",
+    0x01: "基本分归零",
+    0x02: "无卡可抽",
+    0x03: "时间耗尽",
+    0x04: "失去连接",
+}
 
 
 # 安全输出网络日志并兼容不支持 emoji 的控制台编码
@@ -58,6 +78,94 @@ def build_join_payload(password: str, version: int, game_id: int = 0) -> bytes:
 # 判断消息是否要求当前玩家选择先后手
 def is_select_tp_request(msg_type: int, payload: bytes) -> bool:
     return len(payload) == 0 and msg_type in (STOC_SELECT_TP, STOC_HAND_RESULT)
+
+
+# 根据先后攻偏好构建猜拳胜者的选择值
+def build_tp_result(prefer_second: bool) -> int:
+    if not isinstance(prefer_second, bool):
+        raise TypeError("先后攻偏好必须是 bool")
+    return 0 if prefer_second else 1
+
+
+# 从 MSG_START 载荷读取当前客户端对应的 Core 玩家编号
+def parse_duel_player_id(start_payload: bytes) -> int | None:
+    if not start_payload:
+        raise ValueError("MSG_START 缺少玩家类型")
+    player_type = start_payload[0]
+    if player_type & 0xF0:
+        return None
+    return 0 if (player_type & 0x0F) == 0 else 1
+
+
+# 解析服务器计时玩家和剩余时间
+def parse_time_limit(payload: bytes) -> tuple[int, int]:
+    if len(payload) >= 4:
+        player = payload[0]
+        left_time = struct.unpack('<H', payload[2:4])[0]
+    elif len(payload) == 3:
+        player = payload[0]
+        left_time = struct.unpack('<H', payload[1:3])[0]
+    else:
+        raise ValueError(f"STOC_TIME_LIMIT 载荷长度不足: {len(payload)}")
+    if player not in (0, 1):
+        raise ValueError(f"STOC_TIME_LIMIT 玩家编号非法: {player}")
+    return player, left_time
+
+
+# 解析 YGOPro 错误类型及兼容对齐差异的错误代码
+def parse_error_message(payload: bytes) -> tuple[int, int | None]:
+    if not isinstance(payload, bytes):
+        raise TypeError("STOC_ERROR_MSG 载荷必须是 bytes")
+    if not payload:
+        raise ValueError("STOC_ERROR_MSG 载荷为空")
+    error_type = payload[0]
+    if len(payload) >= 8:
+        return error_type, struct.unpack("<I", payload[4:8])[0]
+    if len(payload) >= 5:
+        return error_type, struct.unpack("<I", payload[1:5])[0]
+    return error_type, None
+
+
+# 解析大厅身份变化中的座位和房主标记
+def parse_type_change(payload: bytes) -> tuple[int, bool]:
+    if not isinstance(payload, bytes):
+        raise TypeError("STOC_TYPE_CHANGE 载荷必须是 bytes")
+    if not payload:
+        raise ValueError("STOC_TYPE_CHANGE 载荷为空")
+    player_type = payload[0]
+    return player_type & 0x0F, bool((player_type >> 4) & 0x0F)
+
+
+# 解析大厅玩家状态变化中的原座位和目标状态
+def parse_lobby_player_change(payload: bytes) -> tuple[int, int]:
+    if not isinstance(payload, bytes):
+        raise TypeError("STOC_HS_PLAYER_CHANGE 载荷必须是 bytes")
+    if not payload:
+        raise ValueError("STOC_HS_PLAYER_CHANGE 载荷为空")
+    status = payload[0]
+    return (status >> 4) & 0x0F, status & 0x0F
+
+
+# 解析 Core 胜负消息中的赢家和结束原因
+def parse_win_message(payload: bytes) -> tuple[int, int]:
+    if not isinstance(payload, bytes):
+        raise TypeError("MSG_WIN 载荷必须是 bytes")
+    if len(payload) < 2:
+        raise ValueError("MSG_WIN 载荷长度不足")
+    winner, reason = payload[0], payload[1]
+    if winner not in (0, 1, 2):
+        raise ValueError(f"MSG_WIN 赢家编号非法: {winner}")
+    return winner, reason
+
+
+# 将 Core 胜负原因代码转换为稳定中文说明
+def describe_win_reason(reason: int) -> str:
+    normalized = int(reason)
+    if normalized in WIN_REASON_NAMES:
+        return WIN_REASON_NAMES[normalized]
+    if 0x10 <= normalized <= 0xFF:
+        return f"特殊胜利 0x{normalized:02X}"
+    return f"未知原因 0x{normalized:X}"
 
 class YgoNetClient:
     def __init__(
@@ -169,6 +277,16 @@ class YgoNetClient:
             traceback.print_exc()
             self.is_connected = False
 
+    # 等待当前连接的收包和顺序分发任务全部退出
+    async def wait_for_disconnect(self):
+        tasks = [
+            task
+            for task in (self._receive_task, self._dispatch_task)
+            if task is not None and task is not asyncio.current_task()
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     # 关闭网络连接并回收后台收包任务
     async def close(self):
         self.is_connected = False
@@ -219,6 +337,26 @@ class YgoNetClient:
 
     async def send_ready(self):
         await self.send_packet(CTOS_HS_READY)
+
+    # 由房主在全部决斗者准备后请求开始对局
+    async def send_start_duel(self):
+        await self.send_packet(CTOS_HS_START)
+
+    # 发送符合 YGOPro 协议的游戏内聊天文本
+    async def send_chat(
+        self,
+        text: str,
+        *,
+        max_utf16_units: int = 255,
+        truncate: bool = False,
+    ) -> str:
+        normalized, payload = encode_ctos_chat_payload(
+            text,
+            max_utf16_units=max_utf16_units,
+            truncate=truncate,
+        )
+        await self.send_packet(CTOS_CHAT, payload)
+        return normalized
 
     async def send_decision(self, decision):
         if decision is None:

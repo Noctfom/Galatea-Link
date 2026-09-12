@@ -46,5 +46,7 @@ class InterventionPolicy:
             "choice_id": core_decision.choice_id,
             "confidence": core_decision.confidence,
             "probability_margin": core_decision.probability_margin,
+            "policy_mode": core_decision.policy_mode,
+            "temperature": core_decision.temperature,
         }
         return observation

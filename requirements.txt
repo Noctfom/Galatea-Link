@@ -1,5 +1,5 @@
-# Galatea Link 基础运行依赖
-numpy
-PyYAML>=6.0
-torch
-httpx>=0.27
+# Galatea Link 完整开发环境依赖
+-r requirements-base.txt
+torch>=2.6
+onnxruntime>=1.16
+sentence-transformers>=5,<7

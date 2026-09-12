@@ -1,6 +1,10 @@
 # core/parser.py
 import io
-from core.gamestate import MessageParser
+from core.gamestate import (
+    INTERACTION_MESSAGE_TYPES,
+    INTERACTION_MIN_PAYLOAD_LENGTHS,
+    MessageParser,
+)
 
 class OCGParser:
     """
@@ -28,6 +32,16 @@ class OCGParser:
             start_pos = stream.tell()
             msg_type = data[start_pos]
             stream.read(1) # 跳过 msg_type 字节
+
+            minimum_length = INTERACTION_MIN_PAYLOAD_LENGTHS.get(msg_type)
+            available_length = data_len - stream.tell()
+            if minimum_length is not None and available_length < minimum_length:
+                print(
+                    f"[OCG 不完整交互] 忽略 Type {msg_type}: "
+                    f"载荷 {available_length}/{minimum_length} 字节 "
+                    f"Hex: {data[start_pos:].hex()}"
+                )
+                break
             
             # 特殊指令长度
             if msg_type in [4, 6, 8]:
@@ -42,8 +56,22 @@ class OCGParser:
                         print(f"⚠️ 动态长度计算异常 (Type {msg_type}): {e}")
                         length = -1
             
+            if length < 0 and msg_type in INTERACTION_MESSAGE_TYPES:
+                print(
+                    f"[OCG 不完整交互] 忽略无法确定长度的 Type {msg_type} "
+                    f"Hex: {data[start_pos:].hex()}"
+                )
+                break
+
+            if length >= 0 and stream.tell() + length > data_len:
+                print(
+                    f"[OCG 截断消息] 忽略 Type {msg_type}: "
+                    f"声明载荷 {length} 字节，实际剩余 {data_len - stream.tell()} 字节"
+                )
+                break
+
             # --- 黑洞截断警告雷达 ---
-            if length < 0 or stream.tell() + length > data_len:
+            if length < 0:
                 print(f"\n🚨 [黑洞截断警告] 未知 OCG 指令 (Type {msg_type}) 缺失长度定义！")
                 print(f"💥 强行吞噬了剩余的 {data_len - start_pos - 1} 个字节，这将导致后续时点丢失卡死！")
                 print(f"📦 吞噬残骸 Hex: {data[start_pos:].hex()}")

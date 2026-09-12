@@ -7,10 +7,14 @@ CardReader 模块
 import sqlite3
 import os
 import threading
+from pathlib import Path
+
+
+DEFAULT_CARD_DB_PATH = Path(__file__).resolve().parents[1] / "cards.cdb"
 
 class CardReader:
-    def __init__(self, db_path='cards.cdb'):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = str(DEFAULT_CARD_DB_PATH if db_path is None else db_path)
         self.conn = None
         self.cursor = None
         self.cache = {}
@@ -19,14 +23,53 @@ class CardReader:
         self.stats_cache = {}
         self._db_lock = threading.RLock()
         
-        if os.path.exists(db_path):
+        if os.path.exists(self.db_path):
             try:
-                self.conn = sqlite3.connect(db_path, check_same_thread=False)
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
                 self.cursor = self.conn.cursor()
             except:
                 print("⚠️ 无法连接 cards.cdb")
         else:
             print("⚠️ 未找到 cards.cdb")
+
+    # 关闭当前数据库连接并清理游标
+    def close(self):
+        with self._db_lock:
+            if self.cursor is not None:
+                try:
+                    self.cursor.close()
+                except sqlite3.Error:
+                    pass
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except sqlite3.Error:
+                    pass
+            self.cursor = None
+            self.conn = None
+
+    # 在保持单例引用不变的情况下重新加载卡片数据库
+    def reload(self, db_path=None):
+        resolved = str(DEFAULT_CARD_DB_PATH if db_path is None else db_path)
+        self.close()
+        with self._db_lock:
+            self.db_path = resolved
+            self.cache.clear()
+            self.text_cache.clear()
+            self.effect_text_cache.clear()
+            self.stats_cache.clear()
+            if not os.path.exists(self.db_path):
+                print("⚠️ 未找到 cards.cdb")
+                return False
+            try:
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                self.cursor = self.conn.cursor()
+                return True
+            except sqlite3.Error:
+                self.conn = None
+                self.cursor = None
+                print("⚠️ 无法连接 cards.cdb")
+                return False
 
     def get_base_code(self, code):
         """

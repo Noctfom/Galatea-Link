@@ -1,0 +1,19 @@
+# 模型协议 V3 常量，隔离网络与动作张量结构
+
+ADAPTER_ID = "galatea-model-protocol-v3"
+CHECKPOINT_FORMAT_VERSION = 2
+MODEL_PROTOCOL_VERSION = 3
+MAX_ACTIONS = 120
+
+ACTION_TARGET_SLOTS = 5
+ACTION_OPERATION_COUNT = 32
+ACTION_RESPONSE_BUCKETS = 512
+ACTION_SIGNATURE_BYTES = 4
+ACTION_CONTEXT_DIM = 6
+CHAIN_CONTEXT_DIM = 9
+
+REQUIRED_ASSET_FILENAMES = (
+    "knowledge_base.json",
+    "code_embeddings.npy",
+    "code_embeddings_idx.json",
+)

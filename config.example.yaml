@@ -1,0 +1,87 @@
+# Galatea Link 可公开提交的配置模板
+server:
+  profile: "ygopro"
+  host: "127.0.0.1"
+  port: 7911
+  password: ""
+  protocol_version: 0x1361
+  auto_negotiate_version: true
+  max_version_retries: 1
+  game_id: 0
+  connect_timeout: 10.0
+  trace_packets: false
+
+service:
+  host: "127.0.0.1"
+  port: 8765
+  api_token: ""
+  api_token_env: "GALATEA_LINK_API_TOKEN"
+  event_queue_size: 256
+  webui_enabled: true
+  allowed_origins: []
+
+agent:
+  name: "Galatea_AI"
+  deck: "example"
+  prefer_second: false
+
+model:
+  device: "cpu"
+  weights_path: "./models/galatea_model.onnx"
+  expected_model_id: ""
+  protocol: "auto"
+  inference_backend: "auto"
+  onnx_providers: ["CPUExecutionProvider"]
+  onnx_intra_op_threads: 0
+  assets_path: ""
+  strict_asset_hashes: true
+  config:
+    d_model: 512
+    n_heads: 8
+    n_layers: 6
+    vocab_size: 20000
+
+llm:
+  enabled: false
+  provider: "openai_compatible"
+  base_url: "https://api.example.com/v1"
+  api_key: ""
+  api_key_env: "GALATEA_LLM_API_KEY"
+  model: ""
+  timeout: 30.0
+  max_tokens: 256
+  temperature: 0.1
+  response_format: "json_object"
+  trace_requests: false
+  thinking_mode: "disabled"
+  cache_static_context: true
+  cache_deck_text: false
+  compact_dynamic_observation: true
+
+decision:
+  mode: "core_only"
+  agent_backend: "local"
+  core_policy_mode: "greedy"
+  core_temperature: 0.8
+  core_confidence_threshold: 0.65
+  force_llm_message_types: []
+  include_core_suggestion: true
+  llm_time_budget: 12.0
+  autonomous_intervention_enabled: false
+  autonomous_allowed_modes: ["core_only", "hybrid", "llm_review", "llm_only"]
+  autonomous_core_confidence_min: 0.2
+  autonomous_core_confidence_max: 0.9
+  autonomous_max_ttl_decisions: 3
+  autonomous_max_force_message_types: 8
+
+game_chat:
+  enabled: true
+  capture_incoming: true
+  send_enabled: true
+  include_in_llm_context: true
+  llm_suggestions_enabled: true
+  auto_send_llm_chat: false
+  max_context_messages: 12
+  max_context_chars: 3000
+  max_outbound_utf16_units: 120
+  min_auto_send_interval: 15.0

@@ -272,6 +272,7 @@ class LlmObservationBuilder:
                 "code": code,
                 "current_atk": entity.current_atk,
                 "current_def": entity.current_def,
+                "used_effect_mask": entity.used_effect_mask,
                 "level": entity.level,
                 "type_mask": entity.type_mask,
                 "race": entity.race,

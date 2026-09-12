@@ -4,11 +4,17 @@ Deck 相关的工具函数 (增强版)
 import random
 import os
 import json
+import time
+from pathlib import Path
 from utils.card_reader import card_db
+
+_last_io_check = {'global': 0, 'virtual': 0}
 
 class Deck:
     def __init__(self, name="Unknown"):
         self.name = name # [新增] 记录卡组名
+        self.reference = name
+        self.source = {"kind": "link_local", "label": "Link 本地卡组"}
         self.main = []
         self.extra = [] 
         self.side = []
@@ -19,13 +25,66 @@ def list_decks(deck_dir):
         return []
     return [f[:-4] for f in os.listdir(deck_dir) if f.endswith('.ydk')]
 
+# 将公开 deck_ref 安全解析到本地或 AstrBot 会话目录
+def _resolve_deck_path(base_dir, deck_name):
+    root = Path(base_dir).expanduser().resolve()
+    reference = str(deck_name).strip()
+    if reference.startswith("astrbot:"):
+        parts = reference.split(":")
+        if len(parts) != 3:
+            return None, reference, None
+        _, scope_id, deck_id = parts
+        if not all(
+            value
+            and len(value) <= 80
+            and all(char.isascii() and (char.isalnum() or char in "_-") for char in value)
+            for value in (scope_id, deck_id)
+        ):
+            return None, reference, None
+        path = root / "astrbot_imports" / scope_id / f"{deck_id}.ydk"
+        metadata_path = path.with_suffix(".meta.json")
+        display_name = reference
+        source = None
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if isinstance(metadata.get("display_name"), str):
+                display_name = metadata["display_name"]
+            if isinstance(metadata.get("source"), dict):
+                source = dict(metadata["source"])
+        except Exception:
+            pass
+    else:
+        if (
+            not reference
+            or "/" in reference
+            or "\\" in reference
+            or ".." in reference
+        ):
+            return None, reference, None
+        path = root / f"{reference}.ydk"
+        display_name = reference
+        source = {
+            "kind": "link_local",
+            "label": "Link 本地卡组",
+            "filename": path.name,
+        }
+    try:
+        path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return None, reference, None
+    return path, display_name, source
+
+
 def load_deck(base_dir, deck_name):
     """根据名字加载卡组"""
-    filepath = os.path.join(base_dir, f"{deck_name}.ydk")
-    d = Deck(name=deck_name)
+    filepath, display_name, source = _resolve_deck_path(base_dir, deck_name)
+    d = Deck(name=display_name)
+    d.reference = str(deck_name)
+    if source is not None:
+        d.source = source
     current_section = 'ignore' # 初始状态为忽略，直到碰到 #main
     
-    if not os.path.exists(filepath):
+    if filepath is None or not filepath.is_file() or filepath.is_symlink():
         return None
 
     # 使用 errors='ignore' 防止因为奇怪字符导致崩溃
@@ -33,8 +92,8 @@ def load_deck(base_dir, deck_name):
         for line in f:
             line = line.strip()
             if not line: continue
-            if line.startswith('!'): 
-                current_section = 'ignore' # 暂时忽略 side
+            if line.startswith('!'):
+                current_section = 'side' if line == '!side' else 'ignore'
                 continue
                 
             # 核心修复：绝对白名单区域划分
@@ -53,6 +112,7 @@ def load_deck(base_dir, deck_name):
                 code = card_db.get_base_code(raw_code)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
+                elif current_section == 'side': d.side.append(code)
             except Exception:
                 print(f"[Deck] ⚠️ 解析 {deck_name}.ydk 时遇到非整数行: {line}")
             
@@ -65,21 +125,29 @@ _mtime_dict = {'global': 0, 'virtual': 0}
 def get_json_data(filepath, cache_key):
     if not os.path.exists(filepath): return {}
     try:
-        mtime = os.path.getmtime(filepath)
-        if mtime != _mtime_dict[cache_key]:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                _cache_dict[cache_key] = json.load(f)
-            _mtime_dict[cache_key] = mtime
+        now = time.time()
+        # 冷却时间：10秒内绝不重新查询硬盘文件状态
+        if now - _last_io_check[cache_key] > 10.0:
+            mtime = os.path.getmtime(filepath)
+            _last_io_check[cache_key] = now
+            if mtime != _mtime_dict[cache_key]:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    _cache_dict[cache_key] = json.load(f)
+                _mtime_dict[cache_key] = mtime
         return _cache_dict[cache_key]
-    except Exception: return _cache_dict[cache_key]
+    except Exception: 
+        return _cache_dict[cache_key]
 
 def get_random_deck_pair(ydk_dir='./decks'):
-    if not os.path.exists(ydk_dir): return None, None, None, None
+    """随机返回环境名和两副卡组；无法组成对局时统一返回空值"""
+    if not os.path.exists(ydk_dir):
+        return None
     subdirs = [os.path.join(ydk_dir, d) for d in os.listdir(ydk_dir) if os.path.isdir(os.path.join(ydk_dir, d))]
     
     if not subdirs:
         names = list_decks(ydk_dir)
-        if len(names) < 2: return None, None, None, None
+        if len(names) < 2:
+            return None
         n1, n2 = random.choice(names), random.choice(names)
         return "Root_Mix", n1, load_deck(ydk_dir, n1), n2, load_deck(ydk_dir, n2)
 
@@ -105,13 +173,15 @@ def get_random_deck_pair(ydk_dir='./decks'):
         pool_cfg = virtual_pools[chosen_env]
         # 在虚拟池内，根据配方权重重新抽取物理池
         v_weights = [float(pool_cfg.get(name, 0.0)) for name in subdir_names]
-        if sum(v_weights) <= 0: return None, None, None, None 
+        if sum(v_weights) <= 0:
+            return None
         
         c_env1 = random.choices(subdirs, weights=v_weights, k=1)[0]
         c_env2 = random.choices(subdirs, weights=v_weights, k=1)[0]
         
         names1, names2 = list_decks(c_env1), list_decks(c_env2)
-        if not names1 or not names2: return None, None, None, None
+        if not names1 or not names2:
+            return None
         
         n1, n2 = random.choice(names1), random.choice(names2)
         return chosen_env, n1, load_deck(c_env1, n1), n2, load_deck(c_env2, n2)
@@ -120,6 +190,7 @@ def get_random_deck_pair(ydk_dir='./decks'):
     else:
         chosen_dir = os.path.join(ydk_dir, chosen_env)
         names = list_decks(chosen_dir)
-        if len(names) < 1: return None, None, None, None
+        if len(names) < 1:
+            return None
         n1, n2 = random.choice(names), random.choice(names)
         return chosen_env, n1, load_deck(chosen_dir, n1), n2, load_deck(chosen_dir, n2)
