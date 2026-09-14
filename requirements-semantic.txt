@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Galatea Link 本机 Lua 语义构建可选依赖
 -r requirements-base.txt
 torch>=2.6

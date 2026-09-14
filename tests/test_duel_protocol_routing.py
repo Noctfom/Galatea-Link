@@ -22,13 +22,15 @@ class DuelProtocolRoutingTests(unittest.IsolatedAsyncioTestCase):
         link.ai_player_id = 1
         link.ai_core_player_id = 0
         link.ai = SimpleNamespace(player_id=0)
-        link.deck = SimpleNamespace(main=[100, 200], extra=[300])
+        link.deck = SimpleNamespace(main=[100, 200], extra=[300], side=[400])
         link.gamestate = DuelState(
             p0_main=link.deck.main,
             p0_extra=link.deck.extra,
         )
         link.client = SimpleNamespace(
+            is_connected=True,
             send_packet=AsyncMock(),
+            send_deck=AsyncMock(),
             send_ready=AsyncMock(),
             send_start_duel=AsyncMock(),
         )
@@ -40,6 +42,8 @@ class DuelProtocolRoutingTests(unittest.IsolatedAsyncioTestCase):
         link._start_requested = False
         link._pending_duel_result = None
         link.last_duel_result = None
+        link.last_server_error = None
+        link.last_deck_submission = None
         link.time_player = None
         link.time_left = {0: None, 1: None}
         link.ignore_actions_blacklist = []
@@ -129,6 +133,41 @@ class DuelProtocolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(link._required_protocol_version, 0x1372)
         event_payload = link._publish_event.call_args.args[1]
         self.assertEqual(event_payload["required_version"], 0x1372)
+
+    # 验证加入房间时按主额外备牌三区提交完整卡组
+    async def test_join_submits_complete_deck(self):
+        link = self._make_link()
+
+        await link.handle_server_msg(0x12, bytes(20))
+
+        link.client.send_deck.assert_awaited_once_with(
+            [100, 200],
+            [300],
+            [400],
+        )
+        self.assertEqual(
+            link.last_deck_submission["counts"],
+            {"main": 2, "extra": 1, "side": 1},
+        )
+
+    # 验证禁限卡错误会解除准备锁并公开具体拒绝原因
+    async def test_deck_error_exposes_reason_and_allows_ready_retry(self):
+        link = self._make_link()
+        link.ai_player_id = 0
+        link._ready_seat = 0
+        error_code = (1 << 28) | 89631139
+
+        await link.handle_server_msg(
+            0x02,
+            b"\x02\x00\x00\x00" + struct.pack("<I", error_code),
+        )
+
+        self.assertIsNone(link._ready_seat)
+        self.assertEqual(link.last_server_error["category"], "deck_rejected")
+        self.assertEqual(link.last_server_error["card_code"], 89631139)
+        self.assertIn("禁限卡表", link.last_server_error["reason"])
+        event_payload = link._publish_event.call_args.args[1]
+        self.assertEqual(event_payload["deck"]["counts"]["extra"], 1)
 
     # 验证房主在双方准备后只发送一次开始指令
     async def test_room_host_starts_after_all_players_ready(self):

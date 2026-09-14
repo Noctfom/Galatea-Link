@@ -63,6 +63,7 @@ class AppConfigTests(unittest.TestCase):
                     "core_temperature": 1.25,
                     "core_confidence_threshold": 0.7,
                     "force_llm_message_types": [13, "0x10"],
+                    "core_time_budget": 4.0,
                     "llm_time_budget": 8.0,
                     "autonomous_intervention_enabled": True,
                     "autonomous_allowed_modes": ["hybrid", "llm_review"],
@@ -117,6 +118,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.decision.core_policy_mode, "deployment")
         self.assertEqual(config.decision.core_temperature, 1.25)
         self.assertEqual(config.decision.force_llm_message_types, (13, 16))
+        self.assertEqual(config.decision.core_time_budget, 4.0)
         self.assertEqual(config.decision.llm_time_budget, 8.0)
         self.assertTrue(config.decision.autonomous_intervention_enabled)
         self.assertEqual(
@@ -196,6 +198,11 @@ class AppConfigTests(unittest.TestCase):
     def test_rejects_invalid_llm_time_budget(self):
         with self.assertRaisesRegex(ValueError, "llm_time_budget"):
             build_app_config({"decision": {"llm_time_budget": 0}})
+
+    # 验证 Core 本地计算预算必须为正数
+    def test_rejects_invalid_core_time_budget(self):
+        with self.assertRaisesRegex(ValueError, "core_time_budget"):
+            build_app_config({"decision": {"core_time_budget": 0}})
 
     # 验证自主介入护栏必须使用合法范围
     def test_rejects_invalid_autonomous_guardrails(self):

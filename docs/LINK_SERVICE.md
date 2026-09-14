@@ -12,7 +12,7 @@ YGOPro 兼容客户端 ── YGOPro 协议 ── Link 服务 ── HTTP/WebSo
 
 三类版本彼此独立
 
-- Link 软件版本当前为 `3.0.0`
+- Link 软件版本当前为 `3.1.0`
 - 游戏网络层面向 YGOPro 协议，可连接采用兼容协议的客户端与服务端
 - 模型协议当前首个稳定版本为 V3，已知 Core 3.6.3 至 3.6.5 产生兼容制品
 - 外部接口固定为 `galatea.link.api.v1`
@@ -47,9 +47,19 @@ python scripts/run_link_service.py --config config.yaml
 
 服务默认监听 `127.0.0.1:8765`，浏览器打开 `http://127.0.0.1:8765` 即可使用 Link 自带控制台。服务启动阶段不会加载模型，创建对局会话时才加载
 
-## Docker 中的 AstrBot 连接宿主机 Link
+## Docker 与远程连接
 
-Link 配置需要显式开放监听并设置令牌
+Link 自带 `Dockerfile` 和 `docker-compose.yml`，默认构建 Python 3.11 与 ONNX Runtime 镜像。WebUI、HTTP API、WebSocket 与 AstrBot 桥接共用 `8765` 端口，卡组、模型、GKG、设置和本机密钥统一保存在 `/data` 数据卷
+
+Link 不在容器内开放 YGOPro 游戏端口，因为连接由 Link 主动发往本地或在线 YGOPro 服务。容器访问宿主机 YGOPro 时使用 `host.docker.internal`，访问在线服务器时直接使用其域名或 IP
+
+AstrBot 与 Link 的地址取决于部署位置：
+
+- AstrBot 在宿主机：`http://127.0.0.1:8765`
+- AstrBot 与 Link 位于同一 Docker 网络：`http://galatea-link:8765`
+- AstrBot 位于另一套 Docker Desktop Compose：`http://host.docker.internal:8765`
+
+无论采用哪种拓扑，Link 都需要显式开放监听并设置令牌
 
 ```yaml
 service:
@@ -59,7 +69,7 @@ service:
   api_token_env: "GALATEA_LINK_API_TOKEN"
 ```
 
-在 Windows Docker Desktop 中，AstrBot 插件地址填写 `http://host.docker.internal:8765`。容器环境和 Link 宿主机环境都设置同一个 `GALATEA_LINK_API_TOKEN`
+Link 与 AstrBot 两端设置同一个 `GALATEA_LINK_API_TOKEN`
 
 ```yaml
 galatea_link:
@@ -70,6 +80,8 @@ galatea_link:
 ```
 
 非本机监听但没有令牌时，Link 会拒绝启动服务。跨不可信网络时还应放在 VPN 或 HTTPS 反向代理后，不建议把端口直接暴露到公网
+
+完整构建命令、Compose 网络、数据卷、备份与 PyTorch 变体见 [Docker 部署说明](DOCKER_DEPLOYMENT.md)
 
 ## 外部 API
 

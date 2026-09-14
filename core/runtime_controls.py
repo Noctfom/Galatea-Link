@@ -48,6 +48,8 @@ def validate_decision_controls(config: Any) -> None:
         raise ValueError("Core 模型温度必须位于 0.05 到 5.0")
     if not 0.0 <= config.core_confidence_threshold <= 1.0:
         raise ValueError("Core 置信度阈值必须位于 0 到 1")
+    if config.core_time_budget <= 0:
+        raise ValueError("Core 时间预算必须大于 0")
     if config.llm_time_budget <= 0:
         raise ValueError("LLM 时间预算必须大于 0")
     if not (
@@ -93,6 +95,7 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         "core_confidence_threshold",
         "force_llm_message_types",
         "include_core_suggestion",
+        "core_time_budget",
         "llm_time_budget",
     }
     allowed_autonomy = {
@@ -132,6 +135,11 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         if not isinstance(value, bool):
             raise ValueError("include_core_suggestion 必须是布尔值")
         replacements["include_core_suggestion"] = value
+    if "core_time_budget" in intervention:
+        value = intervention["core_time_budget"]
+        if isinstance(value, bool):
+            raise ValueError("Core 时间预算不能是布尔值")
+        replacements["core_time_budget"] = float(value)
     if "llm_time_budget" in intervention:
         value = intervention["llm_time_budget"]
         if isinstance(value, bool):
@@ -239,6 +247,7 @@ def intervention_payload(config: Any) -> dict[str, Any]:
         "core_confidence_threshold": config.core_confidence_threshold,
         "force_llm_message_types": list(config.force_llm_message_types),
         "include_core_suggestion": config.include_core_suggestion,
+        "core_time_budget": config.core_time_budget,
         "llm_time_budget": config.llm_time_budget,
     }
 

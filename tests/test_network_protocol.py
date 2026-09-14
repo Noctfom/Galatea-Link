@@ -8,11 +8,14 @@ from unittest.mock import AsyncMock
 from core.network import (
     CTOS_HS_START,
     CTOS_JOIN_GAME,
+    CTOS_UPDATE_DECK,
     PLAYERCHANGE_READY,
     YgoNetClient,
+    build_deck_payload,
     build_join_payload,
     build_packet,
     build_tp_result,
+    decode_deck_error_code,
     describe_win_reason,
     is_select_tp_request,
     parse_duel_player_id,
@@ -129,6 +132,32 @@ class NetworkProtocolTests(unittest.TestCase):
         payload = b"\x04" + struct.pack("<I", 0x1372)
         self.assertEqual(parse_error_message(payload), (4, 0x1372))
 
+    # 验证卡组错误高四位和低二十八位可以正确拆分
+    def test_decodes_deck_banlist_error(self):
+        decoded = decode_deck_error_code((1 << 28) | 89631139)
+
+        self.assertEqual(decoded["violation"], "lf_list")
+        self.assertEqual(decoded["card_code"], 89631139)
+        self.assertIsNone(decoded["reported_count"])
+
+    # 验证数量错误不会被误报为违规卡片编号
+    def test_decodes_deck_count_error(self):
+        decoded = decode_deck_error_code((7 << 28) | 16)
+
+        self.assertEqual(decoded["violation"], "extra_count")
+        self.assertIsNone(decoded["card_code"])
+        self.assertEqual(decoded["reported_count"], 16)
+
+    # 验证 YGOPro 卡组包合并主卡和额外卡且单独携带备牌数量
+    def test_builds_standard_ygopro_deck_payload(self):
+        payload = build_deck_payload([100, 200], [300], [400, 500])
+
+        self.assertEqual(struct.unpack("<II", payload[:8]), (3, 2))
+        self.assertEqual(
+            struct.unpack("<IIIII", payload[8:]),
+            (100, 200, 300, 400, 500),
+        )
+
     # 验证客户端加入房间时使用实例配置的协议参数
     def test_client_uses_configured_join_values(self):
         client = YgoNetClient(
@@ -175,6 +204,18 @@ class NetworkProtocolTests(unittest.TestCase):
         asyncio.run(client.send_start_duel())
 
         client.send_packet.assert_awaited_once_with(CTOS_HS_START)
+
+    # 验证客户端发送卡组时保留额外卡组和备牌
+    def test_client_sends_complete_deck_packet(self):
+        client = YgoNetClient("127.0.0.1", 7911, AsyncMock())
+        client.send_packet = AsyncMock()
+
+        asyncio.run(client.send_deck([100], [200], [300]))
+
+        payload = client.send_packet.await_args.args[1]
+        self.assertEqual(client.send_packet.await_args.args[0], CTOS_UPDATE_DECK)
+        self.assertEqual(struct.unpack("<II", payload[:8]), (2, 1))
+        self.assertEqual(struct.unpack("<III", payload[8:]), (100, 200, 300))
 
 
 class NetworkConcurrencyTests(unittest.IsolatedAsyncioTestCase):

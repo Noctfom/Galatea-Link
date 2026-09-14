@@ -50,6 +50,7 @@ class RuntimeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status["duel_active"])
         self.assertFalse(status["core_model"]["available"])
         self.assertEqual(status["decision"]["active_request_id"], 7)
+        self.assertEqual(status["decision"]["core_time_budget"], 5.0)
         self.assertEqual(status["decision"]["llm_time_budget"], 12.0)
         self.assertTrue(status["lobby"]["is_host"])
         self.assertEqual(status["lobby"]["ready_players"], [0, 1])
@@ -88,6 +89,7 @@ class RuntimeApiTests(unittest.IsolatedAsyncioTestCase):
             {
                 "intervention": {
                     "mode": "llm_review",
+                    "core_time_budget": 4.0,
                     "llm_time_budget": 9.0,
                     "include_core_suggestion": False,
                 },
@@ -104,6 +106,7 @@ class RuntimeApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(controls["revision"], 1)
         self.assertEqual(controls["intervention"]["mode"], "llm_review")
+        self.assertEqual(controls["intervention"]["core_time_budget"], 4.0)
         self.assertTrue(controls["autonomy"]["enabled"])
         self.assertEqual(event.payload["source"], "astrbot.qq")
         with self.assertRaisesRegex(RuntimeError, "版本冲突"):

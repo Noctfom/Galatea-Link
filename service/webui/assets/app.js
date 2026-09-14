@@ -557,9 +557,20 @@ function renderStatus(status) {
   );
   setText("#decisionMetric", formatMode(runtime.decision?.mode));
   setText("#decisionMetricNote", `Core 阈值 ${displayValue(runtime.decision?.core_confidence_threshold)}`);
-  setText("#modelMetric", runtime.core_model?.available ? "可用" : "不可用");
+  const coreCircuitReason = runtime.core_model?.circuit_breaker_reason;
+  setText(
+    "#modelMetric",
+    coreCircuitReason
+      ? "本局已熔断"
+      : runtime.core_model?.available
+        ? "可用"
+        : "不可用",
+  );
   const modelBackend = runtime.core_model?.metadata?.backend || runtime.core_model?.metadata?.format;
-  setText("#modelMetricNote", modelBackend ? String(modelBackend) : "查看模型信息");
+  setText(
+    "#modelMetricNote",
+    coreCircuitReason || (modelBackend ? String(modelBackend) : "查看模型信息"),
+  );
   setPill("#duelBadge", runtime.duel_active ? "对局进行中" : "未进入对局", runtime.duel_active ? "success" : "neutral");
   setText("#playerIdValue", runtime.player_id);
   setText("#corePlayerIdValue", runtime.core_player_id);
@@ -1283,6 +1294,7 @@ function renderControls(controls) {
   setText("#thresholdOutput", intervention.core_confidence_threshold ?? 0.65);
   query("#forceTypesInput").value = (intervention.force_llm_message_types || []).join(", ");
   query("#includeCoreInput").checked = Boolean(intervention.include_core_suggestion);
+  query("#coreTimeBudgetInput").value = intervention.core_time_budget ?? 5;
   query("#timeBudgetInput").value = intervention.llm_time_budget ?? 12;
   query("#autonomyEnabledInput").checked = Boolean(autonomy.enabled);
   const allowedModes = new Set(autonomy.allowed_modes || []);
@@ -1386,6 +1398,7 @@ async function saveStrategy(event) {
       core_confidence_threshold: Number(query("#thresholdInput").value),
       force_llm_message_types: parseIntegerList(query("#forceTypesInput").value),
       include_core_suggestion: query("#includeCoreInput").checked,
+      core_time_budget: Number(query("#coreTimeBudgetInput").value),
       llm_time_budget: Number(query("#timeBudgetInput").value),
     },
     autonomy: {

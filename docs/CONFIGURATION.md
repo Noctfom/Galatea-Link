@@ -17,6 +17,8 @@ Link 服务启动时先读取 `config.yaml`，然后读取同目录下的本地�
 
 如果修改 `config.yaml` 后界面仍显示旧值，通常是 `link_state.json` 中已经存在覆盖。可以在 WebUI 修改并保存，或停止服务后备份并移走该状态文件
 
+设置 `GALATEA_LINK_DATA_DIR` 后，Link 会把相对卡组、模型和运行资产路径解析到该目录。Docker 镜像固定使用 `/data`，并从 `/data/config.yaml` 启动，因此配置、状态、密钥、卡组和模型可以随数据卷持久化；普通本机运行不设置时仍使用项目根目录
+
 ## `server` 游戏服务器
 
 | 字段 | 默认或示例 | 说明 |
@@ -112,9 +114,12 @@ Link 服务启动时先读取 `config.yaml`，然后读取同目录下的本地�
 | `core_confidence_threshold` | `0.65` | hybrid 模式触发 LLM 的 Core 置信度阈值，范围 0–1 |
 | `force_llm_message_types` | `[]` | hybrid 下无视置信度、强制交给 LLM 的 OCG 类型 |
 | `include_core_suggestion` | `true` | 向 LLM 提供 Core 选择、置信度和概率间隔 |
+| `core_time_budget` | `5.0` | 单次 Core 推理或复杂动作预处理的最长秒数 |
 | `llm_time_budget` | `12.0` | 单个游戏动作等待本地 LLM 或 AstrBot 的总预算 |
 
-`llm_time_budget` 包含 AstrBot 等锁、模型生成、工具执行和动作提交，不等于 `llm.timeout`。预算到期后旧请求失效，Link 会使用 Core 或 RuleBot 回退
+`core_time_budget` 到期后，Link 会熔断本局后续 Core 调用，并使用 AstrBot、内置 LLM 或独立 RuleBot 继续对局。Core、复杂动作候选和 RuleBot 使用互相隔离的线程，因此失去响应的模型任务不会继续堵住规则回退；下一局会自动恢复 Core
+
+`llm_time_budget` 包含 AstrBot 等锁、模型生成、工具执行和远程动作提交，不等于 `llm.timeout`。预算到期后旧请求失效，Link 会使用 Core 或 RuleBot 回退
 
 自主调整字段：
 

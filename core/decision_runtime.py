@@ -76,20 +76,23 @@ class DecisionCoordinator:
     async def _execute(self, request: DecisionRequest) -> None:
         try:
             result = await self._worker(request)
+            async with self._lock:
+                if self._closed or self._active_request_id != request.request_id:
+                    return
+            await self._committer(request, result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self._error_handler is not None:
-                await self._error_handler(request, exc)
-            return
-
-        async with self._lock:
-            if self._closed or self._active_request_id != request.request_id:
-                return
-            await self._committer(request, result)
-            if self._active_request_id == request.request_id:
-                self._active_request_id = None
-                self._active_task = None
+                try:
+                    await self._error_handler(request, exc)
+                except Exception:
+                    pass
+        finally:
+            async with self._lock:
+                if self._active_request_id == request.request_id:
+                    self._active_request_id = None
+                    self._active_task = None
 
     # 取消当前决策并让尚未完成的计算结果失效
     async def cancel_active(self) -> None:

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Galatea Link 完整开发环境依赖
 -r requirements-base.txt
 torch>=2.6

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Galatea Link V3 ONNX Runtime 推理部署依赖
 -r requirements-base.txt
 onnxruntime>=1.16

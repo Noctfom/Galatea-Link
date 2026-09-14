@@ -116,6 +116,30 @@ class DecisionCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await heartbeat_task
         await coordinator.close()
 
+    # 验证提交阶段异常也会被报告并清理活动请求
+    async def test_committer_failure_reports_error_and_clears_request(self):
+        errors = []
+
+        async def worker(request):
+            # 返回可进入提交阶段的固定结果
+            return request.msg_type
+
+        async def committer(request, result):
+            # 模拟网络提交阶段失败
+            raise RuntimeError("提交失败")
+
+        async def error_handler(request, error):
+            # 保存异常与请求编号供断言
+            errors.append((request.request_id, str(error)))
+
+        coordinator = DecisionCoordinator(worker, committer, error_handler)
+        await coordinator.submit(13, b"commit", object())
+        await coordinator.wait_idle()
+
+        self.assertEqual(errors, [(1, "提交失败")])
+        self.assertIsNone(coordinator.active_request_id)
+        await coordinator.close()
+
 
 if __name__ == "__main__":
     unittest.main()

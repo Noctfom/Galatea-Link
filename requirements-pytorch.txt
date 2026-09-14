@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Galatea Link V3 PyTorch 推理部署依赖
 -r requirements-base.txt
 torch>=2.6

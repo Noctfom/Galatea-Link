@@ -45,6 +45,12 @@ class GalateaRuntimeApi:
         coordinator = getattr(self._link, "decision_coordinator", None)
         ai = getattr(self._link, "ai", None)
         model_metadata = copy.deepcopy(getattr(ai, "model_metadata", None))
+        deck_snapshot = copy.deepcopy(
+            getattr(self._link, "last_deck_submission", None)
+        )
+        snapshot_builder = getattr(self._link, "_deck_snapshot", None)
+        if deck_snapshot is None and callable(snapshot_builder):
+            deck_snapshot = copy.deepcopy(snapshot_builder())
         return {
             "schema_version": "galatea.runtime_status.v1",
             "connected": bool(getattr(self._link.client, "is_connected", False)),
@@ -96,6 +102,19 @@ class GalateaRuntimeApi:
             },
             "core_model": {
                 "available": bool(getattr(ai, "model_available", False)),
+                "runtime_available": bool(
+                    getattr(ai, "model_available", False)
+                    and not getattr(
+                        self._link,
+                        "_core_circuit_breaker_reason",
+                        None,
+                    )
+                ),
+                "circuit_breaker_reason": getattr(
+                    self._link,
+                    "_core_circuit_breaker_reason",
+                    None,
+                ),
                 "metadata": model_metadata,
             },
             "decision": {
@@ -104,6 +123,7 @@ class GalateaRuntimeApi:
                 "core_policy_mode": decision_config.core_policy_mode,
                 "core_temperature": decision_config.core_temperature,
                 "core_confidence_threshold": decision_config.core_confidence_threshold,
+                "core_time_budget": decision_config.core_time_budget,
                 "llm_time_budget": decision_config.llm_time_budget,
                 "force_llm_message_types": list(
                     decision_config.force_llm_message_types
@@ -126,6 +146,11 @@ class GalateaRuntimeApi:
                     "last_decision_choice_id",
                     None,
                 ),
+                "macro_actions_disabled_reason": getattr(
+                    self._link,
+                    "_macro_actions_disabled_reason",
+                    None,
+                ),
                 "controls_revision": self._revision,
             },
             "latest_observation_id": (
@@ -139,6 +164,10 @@ class GalateaRuntimeApi:
             "last_duel_result": copy.deepcopy(
                 getattr(self._link, "last_duel_result", None)
             ),
+            "last_server_error": copy.deepcopy(
+                getattr(self._link, "last_server_error", None)
+            ),
+            "deck": deck_snapshot,
             "game_chat": {
                 "history_size": len(self._link.game_chat_history),
                 "enabled": self._baseline_game_chat_config.enabled,
@@ -239,6 +268,7 @@ class GalateaRuntimeApi:
         *,
         mode: str | None = None,
         core_confidence_threshold: float | None = None,
+        core_time_budget: float | None = None,
         force_llm_message_types: Iterable[int] | None = None,
     ) -> dict[str, Any]:
         intervention_patch = {}
@@ -248,6 +278,8 @@ class GalateaRuntimeApi:
             intervention_patch["core_confidence_threshold"] = (
                 core_confidence_threshold
             )
+        if core_time_budget is not None:
+            intervention_patch["core_time_budget"] = core_time_budget
         if force_llm_message_types is not None:
             intervention_patch["force_llm_message_types"] = list(
                 force_llm_message_types
@@ -598,6 +630,7 @@ class GalateaRuntimeApi:
             "core_confidence_threshold",
             "force_llm_message_types",
             "include_core_suggestion",
+            "core_time_budget",
             "llm_time_budget",
         }
         unknown_autonomy = set(autonomy) - {
@@ -643,6 +676,11 @@ class GalateaRuntimeApi:
             if not isinstance(value, bool):
                 raise ValueError("include_core_suggestion 必须是布尔值")
             replacements["include_core_suggestion"] = value
+        if "core_time_budget" in intervention:
+            value = intervention["core_time_budget"]
+            if isinstance(value, bool):
+                raise ValueError("Core 时间预算不能是布尔值")
+            replacements["core_time_budget"] = float(value)
         if "llm_time_budget" in intervention:
             value = intervention["llm_time_budget"]
             if isinstance(value, bool):
@@ -748,6 +786,8 @@ class GalateaRuntimeApi:
             raise ValueError("Core 模型温度必须位于 0.05 到 5.0")
         if not 0.0 <= config.core_confidence_threshold <= 1.0:
             raise ValueError("Core 置信度阈值必须位于 0 到 1")
+        if config.core_time_budget <= 0:
+            raise ValueError("Core 时间预算必须大于 0")
         if config.llm_time_budget <= 0:
             raise ValueError("LLM 时间预算必须大于 0")
         if not (
@@ -825,6 +865,7 @@ class GalateaRuntimeApi:
             "core_confidence_threshold": config.core_confidence_threshold,
             "force_llm_message_types": list(config.force_llm_message_types),
             "include_core_suggestion": config.include_core_suggestion,
+            "core_time_budget": config.core_time_budget,
             "llm_time_budget": config.llm_time_budget,
         }
 

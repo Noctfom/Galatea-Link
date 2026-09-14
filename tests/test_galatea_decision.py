@@ -3,6 +3,8 @@
 import unittest
 import asyncio
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -93,6 +95,18 @@ class FakeOnnxAi:
             policy_mode=policy_mode,
             temperature=temperature,
         )
+
+
+class BlockingCoreAi:
+    # 初始化会阻塞到测试主动释放的 Core 包装器
+    def __init__(self, release_event):
+        self.model_available = True
+        self.release_event = release_event
+
+    # 阻塞同步推理以模拟 ONNX 或本地模型线程失去响应
+    def get_scored_decision_from_snapshot(self, *args, **kwargs):
+        self.release_event.wait(timeout=1.0)
+        return None
 
 
 class FakeClient:
@@ -204,6 +218,43 @@ class GalateaDecisionTests(unittest.IsolatedAsyncioTestCase):
             [(snapshot, 13, "deployment", 1.1)],
         )
 
+    # 验证 Core 推理卡住时会熔断并由独立规则路径继续决策
+    async def test_core_timeout_falls_back_without_blocking_rule(self):
+        release_core = threading.Event()
+        link = GalateaLink.__new__(GalateaLink)
+        link.ai = BlockingCoreAi(release_core)
+        link.policy_executor = ThreadPoolExecutor(max_workers=1)
+        link.rule_executor = ThreadPoolExecutor(max_workers=1)
+        link.decision_policy = InterventionPolicy(
+            DecisionConfig(mode="core_only", core_time_budget=0.01)
+        )
+        link._core_circuit_breaker_reason = None
+
+        async def compute_rule(request):
+            # 返回固定动作以证明规则回退不再排在 Core 线程之后
+            return b"rule-after-core-timeout"
+
+        link._compute_rule_decision = compute_rule
+        request = DecisionRequest(
+            request_id=4,
+            msg_type=13,
+            raw_msg=b"",
+            snapshot=SimpleNamespace(valid_actions=[object()]),
+        )
+        try:
+            outcome = await asyncio.wait_for(
+                link._compute_decision(request),
+                timeout=0.2,
+            )
+        finally:
+            release_core.set()
+            link.policy_executor.shutdown(wait=False, cancel_futures=True)
+            link.rule_executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual(outcome.source, "rule")
+        self.assertEqual(outcome.response, b"rule-after-core-timeout")
+        self.assertIn("decision_inference", link._core_circuit_breaker_reason)
+
     # 验证宏动作候选失败时不会继续调用 Core 或 LLM
     async def test_macro_failure_forces_rule_fallback(self):
         link = GalateaLink.__new__(GalateaLink)
@@ -223,6 +274,53 @@ class GalateaDecisionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.source, "rule")
         self.assertEqual(outcome.response, b"rule-macro")
+
+    # 验证复杂动作预处理卡住时也会及时返回规则快照
+    async def test_macro_preprocessing_timeout_forces_rule_snapshot(self):
+        release_macro = threading.Event()
+        action = SimpleNamespace(index=0)
+        link = GalateaLink.__new__(GalateaLink)
+        link.ai_player_id = 0
+        link.ai = SimpleNamespace(model_available=False, max_actions=64)
+        link.decision_policy = InterventionPolicy(
+            DecisionConfig(mode="hybrid", core_time_budget=0.01)
+        )
+        link._macro_actions_disabled_reason = None
+        link.macro_executor = ThreadPoolExecutor(max_workers=1)
+
+        def get_snapshot():
+            # 每次返回独立快照以检查超时任务不会改写共享动作池
+            return SimpleNamespace(
+                valid_actions=list(link.gamestate.current_valid_actions),
+                force_rule_fallback=False,
+            )
+
+        link.gamestate = SimpleNamespace(
+            current_valid_actions=[action],
+            get_snapshot=get_snapshot,
+        )
+
+        def blocking_builder(*args, **kwargs):
+            # 阻塞宏动作生成以模拟复杂组合穷举失去响应
+            release_macro.wait(timeout=1.0)
+            return [SimpleNamespace(index=9)]
+
+        try:
+            with patch(
+                "galatea_link.build_macro_action_pool",
+                side_effect=blocking_builder,
+            ):
+                snapshot = await asyncio.wait_for(
+                    link._prepare_prompt_snapshot(15, b"payload"),
+                    timeout=0.2,
+                )
+        finally:
+            release_macro.set()
+            link.macro_executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertTrue(snapshot.force_rule_fallback)
+        self.assertEqual(link.gamestate.current_valid_actions, [action])
+        self.assertIn("复杂宏动作", link._macro_actions_disabled_reason)
 
     # 验证 llm_only 路径完全跳过 Core 并保留聊天建议
     async def test_llm_only_translates_choice_to_response(self):

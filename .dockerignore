@@ -1,0 +1,40 @@
+# 版本控制和开发缓存
+.git/
+.github/
+.vscode/
+.idea/
+.venv/
+venv/
+env/
+.pytest_cache/
+**/__pycache__/
+*.py[cod]
+tests/
+
+# 本机配置和隐私数据
+config.yaml
+config.*.yaml
+!config.example.yaml
+!config.docker.yaml
+.env
+.env.*
+link_state.json
+link_secrets.json
+*.log
+logs/
+
+# 用户卡组、模型与运行资产通过数据卷提供
+decks/
+models/
+model_assets/
+deploy_packages/
+data/
+ygopro-core-master/
+*.gkg
+*.onnx
+*.onnx.data
+*.pth
+*.pt
+knowledge_base.json
+code_embeddings.npy
+code_embeddings_idx.json

@@ -4,13 +4,15 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.0.0-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.1.0-6b8f71)
 
 </div>
 
 Galatea Link 是一个独立的游戏王智能体运行与接入层。它通过 YGOPro 兼容协议连接游戏服务器，并把 Galatea Core 模型、本地 LLM、AstrBot 主智能体、WebUI 与外部 API 统一到同一套异步对局流程中
 
 项目源自 [Galatea Core](https://github.com/Noctfom/Galatea-Core/tree/main) 的在线接入需求，但运行时与 Core 仓库完全独立。Link 项目可以独立运行；模型和运行资产可通过稳定的模型协议或 GKG 部署包导入
+
+Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://github.com/Noctfom/Galatea-Link-mobile)！也可以[点击这里](galatea.noctfom.top)直接前往软件下载页！
 
 > 当前处于开发阶段，优先支持模型协议 V3 和 YGOPro 兼容服务器。请先在测试房间验证卡组、协议版本和决策时限，再用于正式对局
 
@@ -43,79 +45,37 @@ Link 始终负责游戏协议、玩家可见状态、合法动作校验和超时
 
 ## 快速开始
 
-推荐使用 Python 3.11
+### Docker 在线一键部署
 
-### 1. 创建本机配置
-
-PowerShell：
+Windows PowerShell：
 
 ```powershell
-Copy-Item config.example.yaml config.yaml
+irm https://raw.githubusercontent.com/Noctfom/Galatea-Link/main/scripts/install_docker.ps1 | iex
 ```
 
 Linux 或 macOS：
 
 ```bash
-cp config.example.yaml config.yaml
+curl -fsSL https://raw.githubusercontent.com/Noctfom/Galatea-Link/main/scripts/install_docker.sh | sh
 ```
 
-`config.yaml`、`link_state.json`、`link_secrets.json` 和 `.env*` 均被版本控制忽略。完整字段说明见 [配置参考](docs/CONFIGURATION.md)
+### 本地一键自检启动
 
-### 2. 安装依赖
-
-仅使用 LLM、RuleBot 和服务接口：
-
-```bash
-python -m pip install -r requirements-base.txt
-```
-
-推荐的 ONNX 部署：
-
-```bash
-python -m pip install -r requirements-onnx.txt
-```
-
-PyTorch 模型部署：
-
-```bash
-python -m pip install -r requirements-pytorch.txt
-```
-
-完整开发与本机语义构建环境：
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-### 3. 准备卡组与模型
-
-- 在 WebUI 的“卡组仓库”导入至少一副 `.ydk`，或手动放入 `decks/`，并让 `agent.deck` 与文件名对应
-- 将 PTH/ONNX 模型放入 `models/`，或启动服务后从 WebUI 导入 GKG
-- 模型协议 V3 的运行资产放入 `model_assets/v3/<model_id>/`，推荐随 GKG 一并导入
-- 只运行 `llm_only` 时可以没有 Core 模型，但仍然需要合法卡组
-
-### 4. 配置密钥
-
-推荐通过进程环境传入密钥，不要写进 YAML：
+Windows PowerShell：
 
 ```powershell
-$env:GALATEA_LLM_API_KEY = "替换为自己的 LLM API Key"
-$env:GALATEA_LINK_API_TOKEN = "替换为足够长的随机访问令牌"
+powershell -ExecutionPolicy Bypass -File start_windows.ps1
 ```
 
-如果服务仅监听 `127.0.0.1`，Link API Token 可以暂时留空。监听 `0.0.0.0` 或允许容器、局域网访问时必须设置 Token
-
-LLM API Key 也可以在 Link WebUI 保存到本机 `link_secrets.json`。页面只显示是否已配置，不能读取或回显明文
-
-### 5. 启动 Link
+Linux：
 
 ```bash
-python scripts/run_link_service.py --config config.yaml
+sh start_linux.sh
 ```
 
-默认 WebUI 地址为 `http://127.0.0.1:8765`
+启动后打开 `http://127.0.0.1:8765`，在 WebUI 导入卡组和 GKG 或选择已有模型，再启动对局
 
-服务启动本身不会加载模型。点击 WebUI 的“启动 Link”或调用会话启动接口后，才会创建游戏连接并加载所选模型
+依赖选择、手动源码部署、配置、密钥、网络拓扑和持久化见 [部署说明](docs/DOCKER_DEPLOYMENT.md) 与 [配置参考](docs/CONFIGURATION.md)
 
 ## 决策模式
 
@@ -131,15 +91,18 @@ python scripts/run_link_service.py --config config.yaml
 - `local`：Link 直接调用 `llm` 段配置的 API
 - `remote_astrbot`：Link 发布玩家可见观察，AstrBot 主智能体调用动作提交工具
 
-三类超时彼此独立：
+切换为 `remote_astrbot` 只替换 LLM 后端，不会强制改变当前决策模式。Core 是否先执行以及 AstrBot 在哪些时点介入，仍由上表的模式、置信度阈值和自主调整策略决定
+
+四类超时彼此独立：
 
 | 设置 | 控制范围 |
 | --- | --- |
+| `decision.core_time_budget` | Core 推理和复杂宏动作预处理的单阶段时间，默认 5 秒 |
 | `decision.llm_time_budget` | 游戏单个动作等待本地 LLM 或 AstrBot 的总时间 |
 | `llm.timeout` | Link 直连 LLM 供应商的单次 HTTP 请求时间 |
 | AstrBot `request_timeout` | AstrBot 插件访问 Link HTTP 接口的时间 |
 
-远程决策是否能赶上游戏时点，最终取决于 `decision.llm_time_budget`
+Core 超时后只熔断当前对局的 Core 路径，下一局自动恢复；RuleBot 使用独立执行通道，不会排在已经卡住的 Core 线程之后。远程决策是否能赶上游戏时点，最终取决于 `decision.llm_time_budget`
 
 ## AstrBot 接入
 
@@ -198,6 +161,7 @@ python scripts/audit_release_privacy.py
 
 - [配置参考](docs/CONFIGURATION.md)：所有 YAML 分区、优先级和推荐值
 - [Link 独立服务与 WebUI](docs/LINK_SERVICE.md)：服务边界、HTTP API、Docker 和运行资产
+- [部署 Galatea Link](docs/DOCKER_DEPLOYMENT.md)：Docker 快速脚本、源码启动、AstrBot 网络和持久数据卷
 - [异步运行时接口](docs/RUNTIME_API.md)：Python API、事件、观察和远程动作提交
 - [LLM 对局信息契约](docs/LLM_INFORMATION.md)：LLM 能看到什么、缓存和信息边界
 - [AstrBot 远程桥接](docs/ASTRBOT_BRIDGE.md)：插件安装、Pages、工具和会话隔离

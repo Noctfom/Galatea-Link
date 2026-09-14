@@ -46,6 +46,32 @@ WIN_REASON_NAMES = {
     0x04: "失去连接",
 }
 
+DECK_ERROR_NAMES = {
+    0x1: "lf_list",
+    0x2: "ocg_only",
+    0x3: "tcg_only",
+    0x4: "unknown_card",
+    0x5: "card_count",
+    0x6: "main_count",
+    0x7: "extra_count",
+    0x8: "side_count",
+    0x9: "not_available",
+}
+
+DECK_ERROR_REASON_TEMPLATES = {
+    0x1: "卡片不符合当前房间禁限卡表",
+    0x2: "当前房间不允许 OCG 专属卡片",
+    0x3: "当前房间不允许 TCG 专属卡片",
+    0x4: "服务器卡库中不存在这张卡片",
+    0x5: "同名卡片投入数量超过限制",
+    0x6: "主卡组数量不合法",
+    0x7: "额外卡组数量或卡片类型不合法",
+    0x8: "备牌数量不合法",
+    0x9: "当前房间不允许使用这张卡片",
+}
+
+DECK_ERROR_CARD_FLAGS = {0x1, 0x2, 0x3, 0x4, 0x5, 0x9}
+
 
 # 安全输出网络日志并兼容不支持 emoji 的控制台编码
 def _console_print(message: str) -> None:
@@ -124,6 +150,40 @@ def parse_error_message(payload: bytes) -> tuple[int, int | None]:
     if len(payload) >= 5:
         return error_type, struct.unpack("<I", payload[1:5])[0]
     return error_type, None
+
+
+# 将 YGOPro 卡组错误位域拆成错误种类和卡片或数量值
+def decode_deck_error_code(error_code: int) -> dict[str, int | str | None]:
+    if isinstance(error_code, bool) or not isinstance(error_code, int):
+        raise TypeError("卡组错误代码必须是整数")
+    normalized = error_code & 0xFFFFFFFF
+    flag = (normalized >> 28) & 0x0F
+    value = normalized & 0x0FFFFFFF
+    is_card_error = flag in DECK_ERROR_CARD_FLAGS
+    return {
+        "violation_code": flag,
+        "violation": DECK_ERROR_NAMES.get(flag, "unknown"),
+        "card_code": value if is_card_error and value else None,
+        "reported_count": value if not is_card_error else None,
+        "reason": DECK_ERROR_REASON_TEMPLATES.get(flag, "卡组不符合服务器规则"),
+    }
+
+
+# 按 YGOPro 协议构建主卡组额外卡组与备牌上传载荷
+def build_deck_payload(main_deck, extra_deck, side_deck=()) -> bytes:
+    main_cards = [int(code) for code in main_deck]
+    extra_cards = [int(code) for code in extra_deck]
+    side_cards = [int(code) for code in side_deck]
+    all_cards = main_cards + extra_cards + side_cards
+    for code in all_cards:
+        if not 1 <= code <= 0xFFFFFFFF:
+            raise ValueError(f"卡组包含无效卡片编号: {code}")
+    payload = [
+        struct.pack('<I', len(main_cards) + len(extra_cards)),
+        struct.pack('<I', len(side_cards)),
+    ]
+    payload.extend(struct.pack('<I', code) for code in all_cards)
+    return b''.join(payload)
 
 
 # 解析大厅身份变化中的座位和房主标记
@@ -328,12 +388,9 @@ class YgoNetClient:
         payload = build_join_payload(password, version, game_id)
         await self.send_packet(CTOS_JOIN_GAME, payload)
 
-    async def send_deck(self, main_deck, extra_deck):
-        main_len = struct.pack('<I', len(main_deck))
-        extra_len = struct.pack('<I', len(extra_deck))
-        main_bytes = b''.join([struct.pack('<I', code) for code in main_deck])
-        extra_bytes = b''.join([struct.pack('<I', code) for code in extra_deck])
-        await self.send_packet(CTOS_UPDATE_DECK, main_len + extra_len + main_bytes + extra_bytes)
+    async def send_deck(self, main_deck, extra_deck, side_deck=()):
+        payload = build_deck_payload(main_deck, extra_deck, side_deck)
+        await self.send_packet(CTOS_UPDATE_DECK, payload)
 
     async def send_ready(self):
         await self.send_packet(CTOS_HS_READY)

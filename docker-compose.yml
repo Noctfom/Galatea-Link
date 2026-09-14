@@ -1,0 +1,39 @@
+# Galatea Link 单服务部署，HTTP、WebSocket、WebUI 与 AstrBot 共用一个端口
+
+services:
+  galatea-link:
+    build:
+      context: .
+      args:
+        LINK_VERSION: "3.1.0"
+        LINK_REQUIREMENTS: "requirements-onnx.txt"
+    image: galatea-link:3.1.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    ports:
+      - "${GALATEA_LINK_PORT:-8765}:8765"
+    environment:
+      GALATEA_LINK_API_TOKEN: "${GALATEA_LINK_API_TOKEN:?请在 .env 设置 GALATEA_LINK_API_TOKEN}"
+      GALATEA_LLM_API_KEY: "${GALATEA_LLM_API_KEY:-}"
+      GALATEA_LINK_DATA_DIR: "/data"
+    volumes:
+      - galatea-link-data:/data
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - galatea-link
+    stop_grace_period: 20s
+
+volumes:
+  galatea-link-data:
+
+networks:
+  galatea-link:
+    name: galatea-link

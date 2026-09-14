@@ -128,6 +128,7 @@ def apply_deck_operations(
             raise ValueError("卡组修改操作必须是对象")
         unknown = set(operation) - {
             "operation",
+            "op",
             "code",
             "section",
             "to_section",
@@ -135,7 +136,11 @@ def apply_deck_operations(
         }
         if unknown:
             raise ValueError(f"卡组修改操作包含未知字段: {sorted(unknown)}")
-        action = str(operation.get("operation", "")).strip().casefold()
+        if "operation" in operation and "op" in operation:
+            raise ValueError("卡组修改 operation 与 op 不能同时提供")
+        action = str(
+            operation.get("operation", operation.get("op", ""))
+        ).strip().casefold()
         section = str(operation.get("section", "")).strip().casefold()
         to_section = str(operation.get("to_section", "")).strip().casefold()
         if action not in {"add", "remove", "move"}:

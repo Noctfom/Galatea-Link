@@ -104,6 +104,8 @@ class FakeLink:
         self.events = LinkEventBus()
         self.runtime = FakeRuntime(self.events)
         self._closed = asyncio.Event()
+        self.duel_active = False
+        self.reload_deck_calls = 0
 
     # 模拟持续运行的游戏连接
     async def start(self) -> None:
@@ -117,6 +119,15 @@ class FakeLink:
         self.events.publish("link.closed")
         self.events.close()
         self._closed.set()
+
+    # 模拟大厅内重新加载并提交已经修改的会话卡组
+    async def reload_deck_from_storage(self):
+        self.reload_deck_calls += 1
+        return {
+            "loaded": True,
+            "submitted": True,
+            "ready_retried": True,
+        }
 
 
 class LinkSessionManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -176,6 +187,12 @@ class LinkSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(configured["session_configured"])
         self.assertNotIn("password", configured["server"])
         self.assertEqual(configured["decision"]["agent_backend"], "remote_astrbot")
+        await manager.configure_session(
+            {"agent": {"prefer_second": True}}
+        )
+        self.assertEqual(manager._session_config.server.host, "127.0.0.1")
+        self.assertEqual(manager._session_config.server.password, "ephemeral-secret")
+        self.assertTrue(manager._session_config.agent.prefer_second)
         await manager.start()
         self.assertEqual(captured[0].server.password, "ephemeral-secret")
         self.assertEqual(captured[0].decision.agent_backend, "remote_astrbot")
@@ -211,7 +228,7 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
         health = await self.client.get("/api/v1/health")
         self.assertEqual(health.status, 200)
         self.assertEqual(self.created, [])
-        self.assertEqual((await health.json())["data"]["version"], "3.0.0")
+        self.assertEqual((await health.json())["data"]["version"], "3.1.0")
 
         unauthorized = await self.client.get("/api/v1/status")
         self.assertEqual(unauthorized.status, 401)
@@ -287,7 +304,7 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
                 json={
                     "deck_ref": "网页卡组",
                     "operations": [
-                        {"operation": "add", "code": 46986414, "section": "main"}
+                        {"op": "add", "code": 46986414, "section": "main"}
                     ],
                 },
             )
@@ -641,7 +658,8 @@ class DeckHttpApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stopped_edit.status, 200)
 
         await self.client.post("/api/v1/session/start", headers=headers)
-        running_edit = await self.client.patch(
+        self.manager._link.duel_active = True
+        active_duel_edit = await self.client.patch(
             "/api/v1/decks/local",
             headers=headers,
             json={
@@ -651,7 +669,7 @@ class DeckHttpApiTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        self.assertEqual(running_edit.status, 409)
+        self.assertEqual(active_duel_edit.status, 409)
 
     # 验证 HTTP 接口只向请求会话返回本地卡组临时副本
     async def test_local_deck_copy_endpoint_creates_editable_session_copy(self):
@@ -788,7 +806,24 @@ class DeckHttpApiTests(unittest.IsolatedAsyncioTestCase):
             headers=headers,
         )
         self.assertEqual(started.status, 202)
-        running_edit = await self.client.patch(
+
+        lobby_edit = await self.client.patch(
+            "/api/v1/decks/current",
+            headers=headers,
+            json={
+                "scope_id": "group_100",
+                "operations": [
+                    {"operation": "add", "code": 23995346, "section": "extra"}
+                ],
+            },
+        )
+        lobby_edit_data = (await lobby_edit.json())["data"]
+        self.assertEqual(lobby_edit.status, 200)
+        self.assertTrue(lobby_edit_data["runtime_application"]["submitted"])
+        self.assertTrue(lobby_edit_data["runtime_application"]["ready_retried"])
+        self.assertEqual(self.manager._link.reload_deck_calls, 1)
+        self.manager._link.duel_active = True
+        active_duel_edit = await self.client.patch(
             "/api/v1/decks/current",
             headers=headers,
             json={
@@ -798,7 +833,7 @@ class DeckHttpApiTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        self.assertEqual(running_edit.status, 409)
+        self.assertEqual(active_duel_edit.status, 409)
 
 
 if __name__ == "__main__":

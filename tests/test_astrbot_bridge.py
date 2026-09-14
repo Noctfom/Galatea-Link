@@ -241,6 +241,7 @@ class AstrBotRemoteBridgeTests(unittest.IsolatedAsyncioTestCase):
         script = (plugin_root / "pages/link-control/app.js").read_text(
             encoding="utf-8"
         )
+        plugin_main = (plugin_root / "main.py").read_text(encoding="utf-8")
         schema = json.loads(
             (plugin_root / "_conf_schema.json").read_text(encoding="utf-8")
         )["galatea_link"]["items"]
@@ -272,6 +273,31 @@ class AstrBotRemoteBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("agentGameChatEnabled", script)
         self.assertIn("decisionTimeBudget", script)
         self.assertIn("saveToast", script)
+        self.assertNotIn('mode: "llm_only"', script)
+        self.assertNotIn(
+            '{"agent_backend": "remote_astrbot", "mode": "llm_only"}',
+            plugin_main,
+        )
+
+    # 验证服务器卡组拒绝原因会保留并通知 AstrBot 所属会话
+    async def test_forwards_structured_deck_rejection(self):
+        await self.bridge.start("qq:group:100")
+        await self.bridge._forward_event(
+            "qq:group:100",
+            {
+                "event_type": "server.error",
+                "payload": {
+                    "category": "deck_rejected",
+                    "reason": "卡片不符合当前房间禁限卡表: 测试卡 (123)",
+                },
+            },
+        )
+
+        self.assertEqual(
+            self.bridge.get_status()["last_server_error"]["category"],
+            "deck_rejected",
+        )
+        self.assertIn("禁限卡表", self.notifications[-1][1])
 
     # 验证桥接器能读取对局观察并投递 QQ 社交消息
     async def test_external_message_and_observation_bridge(self):

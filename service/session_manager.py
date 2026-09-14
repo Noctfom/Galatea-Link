@@ -313,6 +313,7 @@ class LinkSessionManager:
             "core_policy_mode": config.decision.core_policy_mode,
             "core_temperature": config.decision.core_temperature,
             "core_confidence_threshold": config.decision.core_confidence_threshold,
+            "core_time_budget": config.decision.core_time_budget,
             "llm_time_budget": config.decision.llm_time_budget,
         }
         return snapshot
@@ -325,7 +326,7 @@ class LinkSessionManager:
             raise ValueError("会话配置必须是 JSON 对象")
         if set(payload) - {"server", "agent", "decision", "deck_scope_id"}:
             raise ValueError("会话配置包含未知分区")
-        base = self._settings.get_app_config()
+        base = self._session_config or self._settings.get_app_config()
         server_patch = payload.get("server", {})
         agent_patch = payload.get("agent", {})
         decision_patch = payload.get("decision", {})
@@ -333,7 +334,7 @@ class LinkSessionManager:
             raise ValueError("会话配置分区必须是 JSON 对象")
         allowed_server = {"host", "port", "password", "protocol_version", "auto_negotiate_version", "max_version_retries", "game_id", "connect_timeout", "trace_packets"}
         allowed_agent = {"name", "deck", "prefer_second"}
-        allowed_decision = {"mode", "agent_backend", "core_policy_mode", "core_temperature", "core_confidence_threshold", "force_llm_message_types", "include_core_suggestion", "llm_time_budget"}
+        allowed_decision = {"mode", "agent_backend", "core_policy_mode", "core_temperature", "core_confidence_threshold", "force_llm_message_types", "include_core_suggestion", "core_time_budget", "llm_time_budget"}
         if set(server_patch) - allowed_server or set(agent_patch) - allowed_agent or set(decision_patch) - allowed_decision:
             raise ValueError("会话配置包含未知字段")
         server_values = {}
@@ -357,7 +358,10 @@ class LinkSessionManager:
         if "prefer_second" in agent_patch:
             agent_values["prefer_second"] = require_bool(agent_patch["prefer_second"], "agent.prefer_second")
         agent = replace(base.agent, **agent_values)
-        deck_scope_id = payload.get("deck_scope_id")
+        deck_scope_id = payload.get(
+            "deck_scope_id",
+            self._session_deck_scope_id,
+        )
         if deck_scope_id is not None:
             deck_scope_id = str(deck_scope_id).strip()
         self._ensure_deck_available(agent.deck, deck_scope_id)
@@ -608,8 +612,12 @@ class LinkSessionManager:
         if not normalized_scope:
             raise ValueError("AstrBot 卡组作用域不能为空")
         async with self._lock:
-            if self.is_running:
-                raise RuntimeError("对局运行中不能修改当前对战卡组")
+            if self._state == "stopping":
+                raise RuntimeError("Link 会话停止中不能修改当前对战卡组")
+            if self._link is not None and bool(
+                getattr(self._link, "duel_active", False)
+            ):
+                raise RuntimeError("决斗进行中不能修改当前对战卡组")
             if self._session_config is None:
                 raise RuntimeError("请先配置本次 Link 对局并选择临时卡组")
             if self._session_deck_scope_id != normalized_scope:
@@ -623,12 +631,27 @@ class LinkSessionManager:
                 deck_ref,
                 operations,
             )
+            runtime_application = None
+            if self._link is not None:
+                reload_deck = getattr(
+                    self._link,
+                    "reload_deck_from_storage",
+                    None,
+                )
+                if callable(reload_deck):
+                    runtime_application = await reload_deck()
+            record["runtime_application"] = runtime_application or {
+                "loaded": False,
+                "applies_on_start": self._link is None,
+            }
             self._events.publish(
                 "service.deck.edited",
                 {
                     "deck_ref": record["deck_ref"],
                     "display_name": record["display_name"],
                     "source": record["source"],
+                    "counts": record["counts"],
+                    "runtime_application": record["runtime_application"],
                 },
             )
             return record

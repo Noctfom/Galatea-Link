@@ -1,5 +1,6 @@
 # Galatea Link 配置加载模块，负责解析服务端、智能体和模型设置
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -8,11 +9,22 @@ from typing import Any, Mapping
 LINK_PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-# 将相对资源路径稳定解析到 Link 项目目录
+# 返回模型卡组与持久设置使用的数据根目录
+def get_link_data_root() -> Path:
+    configured = str(os.getenv("GALATEA_LINK_DATA_DIR", "")).strip()
+    if not configured:
+        return LINK_PROJECT_ROOT
+    return Path(configured).expanduser().resolve()
+
+
+LINK_DATA_ROOT = get_link_data_root()
+
+
+# 将相对资源路径稳定解析到 Link 数据根目录
 def resolve_link_resource_path(path: str) -> str:
     resource_path = Path(path).expanduser()
     if not resource_path.is_absolute():
-        resource_path = LINK_PROJECT_ROOT / resource_path
+        resource_path = LINK_DATA_ROOT / resource_path
     return str(resource_path.resolve())
 
 
@@ -79,6 +91,7 @@ class DecisionConfig:
     core_confidence_threshold: float = 0.65
     force_llm_message_types: tuple[int, ...] = ()
     include_core_suggestion: bool = True
+    core_time_budget: float = 5.0
     llm_time_budget: float = 12.0
     autonomous_intervention_enabled: bool = False
     autonomous_allowed_modes: tuple[str, ...] = (
@@ -349,6 +362,7 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
             decision_raw.get("include_core_suggestion", True),
             "decision.include_core_suggestion",
         ),
+        core_time_budget=float(decision_raw.get("core_time_budget", 5.0)),
         llm_time_budget=float(decision_raw.get("llm_time_budget", 12.0)),
         autonomous_intervention_enabled=_as_bool(
             decision_raw.get("autonomous_intervention_enabled", False),
@@ -376,6 +390,8 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
             "decision.autonomous_max_force_message_types",
         ),
     )
+    if decision.core_time_budget <= 0:
+        raise ValueError("配置项 decision.core_time_budget 必须大于 0")
     if decision.llm_time_budget <= 0:
         raise ValueError("配置项 decision.llm_time_budget 必须大于 0")
     invalid_autonomous_modes = set(decision.autonomous_allowed_modes) - {

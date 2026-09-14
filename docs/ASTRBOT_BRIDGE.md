@@ -79,7 +79,7 @@ Page 会区分插件开关、Link HTTP 可达、WebSocket 事件流、对局任�
 | `galatea_link_last_duel` | 查询当前会话最近一次轻量对局摘要 |
 | `galatea_link_configure_session` | 配置服务器端口、密码、卡组和本次决策参数 |
 | `galatea_link_list_decks` | 列出 Link 本地卡组和当前会话可见的工具箱卡组 |
-| `galatea_link_import_current_deck` | 将指定 Link 本地卡组复制为当前会话临时卡组 |
+| `galatea_link_import_current_deck` | 将当前工具箱缓存同步为会话临时卡组并设为待对战卡组 |
 | `galatea_deck_import` | 导入 YDK 文本、YDKe、Ourocg 链接或消息附件 |
 | `galatea_card_lookup` | 按卡名或卡密查询卡片文本和可选裁定 |
 | `galatea_link_edit_current_deck` | 在显式授权后修改当前临时对战卡组 |
@@ -89,7 +89,7 @@ Page 会区分插件开关、Link HTTP 可达、WebSocket 事件流、对局任�
 | `galatea_link_game_chat` | 向游戏内发送短消息 |
 | `galatea_link_submit_decision` | 提交合法动作和可选的临时介入调整 |
 
-插件会把 `galatea_link_configure_session` 配置的决策后端切换为 `remote_astrbot`。需要判断时，Link 通过事件流发送带有效期的玩家可见观察；AstrBot 在原主智能体上下文内决策，再提交 `request_id`、观察身份和动作。过期、跨会话、观察不匹配或非法动作都会被 Link 拒绝
+插件会把 `galatea_link_configure_session` 配置的决策后端切换为 `remote_astrbot`，但不会改变 Link 已选择的 `core_only`、`hybrid`、`llm_review` 或 `llm_only` 模式。AstrBot 只是替代 Link 本地 LLM 后端：`core_only` 不请求 AstrBot，`hybrid` 只在策略要求介入时请求，`llm_review` 和 `llm_only` 则按各自规则请求。需要判断时，Link 通过事件流发送带有效期的玩家可见观察；AstrBot 在原主智能体上下文内决策，再提交 `request_id`、观察身份和动作。过期、跨会话、观察不匹配或非法动作都会被 Link 拒绝
 
 ## 桥接方法
 
@@ -111,11 +111,13 @@ Page 会区分插件开关、Link HTTP 可达、WebSocket 事件流、对局任�
 
 工具箱每次成功保存或转存 YDK 后，会在当前事件循环中异步复制到 Link。`galatea_link_list_decks` 只列出 Link 本地卡组和当前群聊或当前用户作用域的缓存卡组，并返回具体卡片名称、投入数量和来源。`galatea_link_configure_session` 接受列表中的 `deck_ref` 或显示名；选择 Link 本地卡组时插件会先复制成当前会话临时副本，再由 Link 校验会话归属
 
-`galatea_deck_import` 供主智能体代为解析 YDK 文本、YDKe、Ourocg 链接或当前消息及引用消息中的 YDK 文件。它复用原工具箱解析和 24 小时清理逻辑，只写入当前会话缓存，并在 Link 可用时立即返回同步后的临时卡组记录
+`galatea_deck_import` 供主智能体代为解析 YDK 文本、YDKe、Ourocg 链接或当前消息及引用消息中的 YDK 文件。它复用原工具箱解析和 24 小时清理逻辑，只写入当前会话缓存，并在 Link 可用时立即把同步后的副本设为当前待对战临时卡组，因此导入后可直接调用编辑工具。`galatea_link_configure_session` 也允许只传卡组而沿用现有服务器设置
 
 `galatea_card_lookup` 复用工具箱的百鸽搜索器，支持用卡名或卡密查询卡名、卡密、类型、效果文本、灵摆文本和基础数值，也可以按需返回最匹配卡片的裁定问答
 
-`galatea_link_edit_current_deck` 只在管理员显式开启 `allow_agent_deck_edit` 后可用，并且 Link 会再次校验它只能在对局启动前修改当前会话已选中的 AstrBot 临时卡组。修改操作支持 `add`、`remove` 和 `move`，目标区域为 `main`、`extra` 或 `side`
+`galatea_link_edit_current_deck` 只在管理员显式开启 `allow_agent_deck_edit` 后可用，并且 Link 会再次校验它只能修改当前会话已选中的 AstrBot 临时卡组。Link 会话尚未启动时，修改在下次启动加载；已经进入大厅但决斗尚未真正开始时，Link 会立即重载实际 YDK，按 YGOPro 标准重新上传主卡、额外卡组和备牌，并重新发送准备。真正进入决斗后仍拒绝修改。修改操作支持 `add`、`remove` 和 `move`，兼容主智能体常用的 `operation` 与 `op` 字段名，目标区域为 `main`、`extra` 或 `side`
+
+服务器拒绝准备时，Link 会解析 `STOC_ERROR_MSG` 中的卡组错误位域，返回禁限卡表、OCG/TCG 限制、未知卡、同名卡数量、主卡数量、额外卡组数量、备牌数量或不可用卡片等原因。卡片类错误会附带卡名与卡密，数量类错误会附带服务端报告数量；该结果会进入 AstrBot 通知以及 `galatea_link_status` 的最近服务器拒绝字段，便于主智能体修改临时卡组后重试
 
 当前模型协议 V3 只覆盖初始卡组提交，没有定义 BO3 局间换备阶段。现阶段可以在开局前编辑 `side` 区域，但不会模拟在线 BO3 换备；该流程等待 Core V4 上层换备模块确定状态与协议后接入
 
@@ -146,6 +148,10 @@ Docker 中不要用 `127.0.0.1` 指向宿主机 Link，应改用 `host.docker.in
 ### 动作总在固定秒数超时
 
 `request_timeout` 只控制普通 HTTP 请求。远程动作的完整预算来自 Link 的 `decision.astrbot_time_budget` 或会话覆盖，AstrBot 调用自身模型的超时还必须不小于该预算。修改后用 `/决斗AI 配置` 或 Link WebUI 核对实际生效值
+
+### 额外卡组为空或修改后没有生效
+
+确认 Link 与 AstrBot 插件均已更新。YGOPro 的 `CTOS_UPDATE_DECK` 不使用独立的额外卡组长度字段，而是将主卡组和额外卡组合并计入第一个区域、将备牌放入第二个区域；旧版 Link 会把额外卡组误当成备牌。更新后可调用 `galatea_link_status` 核对 Link 实际加载的主卡、额外卡组和备牌数量
 
 ### 游戏聊天出现模型错误文本
 

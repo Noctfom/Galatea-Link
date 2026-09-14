@@ -8,6 +8,7 @@ from app_config import (
     AppConfig,
     DecisionConfig,
     GameChatConfig,
+    LINK_DATA_ROOT,
     LINK_PROJECT_ROOT,
     LlmConfig,
     load_app_config,
@@ -39,6 +40,7 @@ from core.network import (
     YgoNetClient,
     _console_print,
     build_tp_result,
+    decode_deck_error_code,
     describe_win_reason,
     is_select_tp_request,
     parse_duel_player_id,
@@ -113,19 +115,21 @@ class GalateaLink:
         self._start_requested = False
         self._pending_duel_result = None
         self.last_duel_result = None
+        self.last_server_error = None
+        self.last_deck_submission = None
         self._closed = False
         configured_asset_path = (
             Path(resolve_link_resource_path(model_assets_path))
             if model_assets_path
             else None
         )
-        default_asset_path = LINK_PROJECT_ROOT / "model_assets" / "v3"
+        default_asset_path = LINK_DATA_ROOT / "model_assets" / "v3"
         self.model_assets_path = (
             configured_asset_path
             if configured_asset_path is not None
             else default_asset_path
             if default_asset_path.is_dir()
-            else LINK_PROJECT_ROOT
+            else LINK_DATA_ROOT
         )
 
         _console_print("🤖 正在唤醒 Galatea AI...")
@@ -153,11 +157,16 @@ class GalateaLink:
         card_db.reload(
             selected_card_database
             if selected_card_database.is_file()
-            else LINK_PROJECT_ROOT / "cards.cdb"
+            else (
+                LINK_DATA_ROOT / "cards.cdb"
+                if (LINK_DATA_ROOT / "cards.cdb").is_file()
+                else LINK_PROJECT_ROOT / "cards.cdb"
+            )
         )
 
         _console_print(f"🃏 正在加载卡组: {deck_name}")
-        self.deck = load_deck(str(LINK_PROJECT_ROOT / "decks"), deck_name)
+        self.deck_reference = str(deck_name)
+        self.deck = load_deck(str(LINK_DATA_ROOT / "decks"), deck_name)
         if self.deck is None:
             raise FileNotFoundError(f"\\n❌ 找不到卡组文件！")
             
@@ -188,6 +197,7 @@ class GalateaLink:
         self.decision_policy = InterventionPolicy(decision_config or DecisionConfig())
         self.remote_decisions = RemoteDecisionBroker(self.event_bus)
         active_llm_config = llm_config or LlmConfig()
+        self.llm_config = active_llm_config
         self.llm_client = (
             create_llm_client(active_llm_config)
             if self.decision_policy.config.agent_backend == "local"
@@ -207,11 +217,21 @@ class GalateaLink:
         self.last_decision_choice_id = None
         self.last_decision_source = None
         self.latest_chat_suggestion = None
+        self._core_circuit_breaker_reason = None
+        self._macro_actions_disabled_reason = None
         self.game_chat_config = game_chat_config or GameChatConfig()
         self.game_chat_history = GameChatHistory()
         self.policy_executor = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix="galatea-policy",
+            thread_name_prefix="galatea-core",
+        )
+        self.macro_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="galatea-macro",
+        )
+        self.rule_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="galatea-rule",
         )
         self.decision_coordinator = DecisionCoordinator(
             self._compute_decision,
@@ -300,11 +320,14 @@ class GalateaLink:
             await self.client.close()
             if self.llm_client is not None:
                 await self.llm_client.close()
-            await asyncio.to_thread(
-                self.policy_executor.shutdown,
-                wait=True,
-                cancel_futures=True,
-            )
+            for executor_name in (
+                "policy_executor",
+                "macro_executor",
+                "rule_executor",
+            ):
+                executor = getattr(self, executor_name, None)
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
         finally:
             self.duel_active = False
             self._publish_event("link.closed")
@@ -318,11 +341,12 @@ class GalateaLink:
                 self.room_ready = {0: False, 1: False, 2: False, 3: False}
                 self._ready_seat = None
                 self._start_requested = False
+                self.last_server_error = None
                 self._publish_event(
                     "room.joined",
                     {"duel_mode": self.room_duel_mode},
                 )
-                await self.client.send_deck(self.deck.main, self.deck.extra)
+                await self._submit_current_deck()
                 # 注意：这里先不要发 send_ready()，等服务器下发 0x13 之后再发
 
             elif msg_type == 0x13: # STOC_TYPE_CHANGE
@@ -349,6 +373,10 @@ class GalateaLink:
                 if self.ai_player_id in (0, 1, 2, 3) and self._ready_seat != self.ai_player_id:
                     await self.client.send_ready()
                     self._ready_seat = self.ai_player_id
+                    self._publish_event(
+                        "room.ready.requested",
+                        {"player_id": self.ai_player_id, "retry": False},
+                    )
 
             elif msg_type == STOC_HS_PLAYER_CHANGE:
                 player_id, state = parse_lobby_player_change(msg_data)
@@ -401,15 +429,49 @@ class GalateaLink:
             elif msg_type == 0x02: # STOC_ERROR_MSG
                 if not msg_data:
                     _console_print("🚨 [服务器错误] 收到空错误包")
-                    self._publish_event("server.error", {"error_type": None})
+                    payload = {
+                        "error_type": None,
+                        "category": "unknown",
+                        "reason": "服务器返回空错误包",
+                        "error": "服务器返回空错误包",
+                    }
+                    self.last_server_error = copy.deepcopy(payload)
+                    self._publish_event("server.error", payload)
                     return
                 err_type, err_code = parse_error_message(msg_data)
                 if err_type == 2 and err_code is not None:
-                    _console_print(f"\n🚨 [卡组被拒] 违规卡片 Code: {err_code}\n")
-                    self._publish_event(
-                        "server.error",
-                        {"error_type": err_type, "card_code": err_code},
+                    details = decode_deck_error_code(err_code)
+                    card_code = details.get("card_code")
+                    card_name = (
+                        card_db.get_card_name(card_code)
+                        if isinstance(card_code, int)
+                        else None
                     )
+                    reason = str(details["reason"])
+                    if card_name and isinstance(card_code, int):
+                        reason = f"{reason}: {card_name} ({card_code})"
+                    elif details.get("reported_count") is not None:
+                        reason = (
+                            f"{reason}（服务端报告 "
+                            f"{details['reported_count']} 张）"
+                        )
+                    payload = {
+                        "error_type": err_type,
+                        "category": "deck_rejected",
+                        "error_code": err_code,
+                        **details,
+                        "card_name": card_name,
+                        "reason": reason,
+                        "error": reason,
+                        "deck": self._deck_snapshot(),
+                    }
+                    self._ready_seat = None
+                    if self.ai_player_id in self.room_ready:
+                        self.room_ready[self.ai_player_id] = False
+                    self._start_requested = False
+                    self.last_server_error = copy.deepcopy(payload)
+                    _console_print(f"\n🚫 [卡组被拒] {reason}\n")
+                    self._publish_event("server.error", payload)
                 elif err_type == 4 and err_code is not None:
                     self._required_protocol_version = err_code
                     _console_print(
@@ -429,10 +491,15 @@ class GalateaLink:
                         },
                     )
                 else:
-                    self._publish_event(
-                        "server.error",
-                        {"error_type": err_type, "error_code": err_code},
-                    )
+                    payload = {
+                        "error_type": err_type,
+                        "category": "server_error",
+                        "error_code": err_code,
+                        "reason": f"游戏服务器返回错误类型 {err_type}",
+                        "error": f"游戏服务器返回错误类型 {err_type}",
+                    }
+                    self.last_server_error = copy.deepcopy(payload)
+                    self._publish_event("server.error", payload)
                     
             # 决斗开始 (0x15)
             elif msg_type == 0x15 and len(msg_data) == 0:
@@ -629,47 +696,87 @@ class GalateaLink:
             or self.ai_player_id not in (0, 1)
         ):
             return self.gamestate.get_snapshot()
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self.policy_executor,
-            functools.partial(
-                self._prepare_macro_snapshot,
-                msg_type,
-                msg_payload,
-            ),
-        )
-
-    # 使用两阶段模型偏好生成可直接提交的复杂宏动作候选
-    def _prepare_macro_snapshot(self, msg_type, msg_payload):
         base_actions = list(self.gamestate.current_valid_actions)
         base_snapshot = self.gamestate.get_snapshot()
-        probabilities = [1.0] * len(base_actions)
-
-        if self.decision_policy.should_run_core() and getattr(
-            self.ai,
-            "model_available",
-            False,
-        ):
-            try:
-                probabilities = self.ai.get_action_probabilities_from_snapshot(
-                    base_snapshot
-                )
-            except Exception as error:
-                _console_print(f"🧠 Core 宏动作意图计算异常，使用均匀候选权重: {error}")
-
-        try:
-            macro_actions = build_macro_action_pool(
-                msg_type,
-                msg_payload,
-                self.gamestate,
-                base_actions,
-                probabilities,
-                max_actions=self.ai.max_actions,
-            )
-        except Exception as error:
-            _console_print(f"⚠️ 复杂宏动作候选生成失败并强制使用 RuleBot: {error}")
+        if getattr(self, "_macro_actions_disabled_reason", None):
             base_snapshot.force_rule_fallback = True
             return base_snapshot
+
+        probabilities = [1.0] * len(base_actions)
+        loop = asyncio.get_running_loop()
+        should_score_with_core = (
+            self.decision_policy.should_run_core()
+            and getattr(self.ai, "model_available", False)
+            and not getattr(self, "_core_circuit_breaker_reason", None)
+        )
+        if should_score_with_core:
+            try:
+                async with asyncio.timeout(
+                    self.decision_policy.config.core_time_budget
+                ):
+                    probabilities = await loop.run_in_executor(
+                        getattr(self, "policy_executor", None),
+                        functools.partial(
+                            self.ai.get_action_probabilities_from_snapshot,
+                            base_snapshot,
+                        ),
+                    )
+            except TimeoutError:
+                self._trip_core_circuit_breaker(
+                    "macro_scoring",
+                    self.decision_policy.config.core_time_budget,
+                )
+            except Exception as error:
+                _console_print(
+                    f"🧠 Core 宏动作意图计算异常，使用均匀候选权重: {error}"
+                )
+
+        try:
+            async with asyncio.timeout(
+                self.decision_policy.config.core_time_budget
+            ):
+                macro_actions = await loop.run_in_executor(
+                    getattr(self, "macro_executor", None),
+                    functools.partial(
+                        self._build_macro_actions,
+                        msg_type,
+                        msg_payload,
+                        base_actions,
+                        probabilities,
+                    ),
+                )
+        except TimeoutError:
+            reason = (
+                "复杂宏动作候选生成超过 "
+                f"{self.decision_policy.config.core_time_budget:.1f} 秒"
+            )
+            self._macro_actions_disabled_reason = reason
+            base_snapshot.force_rule_fallback = True
+            _console_print(f"⚠️ {reason}，本局后续复杂动作强制使用 RuleBot")
+            self._publish_event(
+                "decision.preprocessing.timed_out",
+                {
+                    "message_type": msg_type,
+                    "stage": "macro_actions",
+                    "time_budget": self.decision_policy.config.core_time_budget,
+                    "fallback": "rule",
+                },
+            )
+            return base_snapshot
+        except Exception as error:
+            base_snapshot.force_rule_fallback = True
+            _console_print(f"⚠️ 复杂宏动作候选生成失败并强制使用 RuleBot: {error}")
+            self._publish_event(
+                "decision.preprocessing.failed",
+                {
+                    "message_type": msg_type,
+                    "stage": "macro_actions",
+                    "error": str(error),
+                    "fallback": "rule",
+                },
+            )
+            return base_snapshot
+
         if not macro_actions:
             _console_print("⚠️ 未生成复杂宏动作候选并强制使用 RuleBot")
             base_snapshot.force_rule_fallback = True
@@ -677,6 +784,47 @@ class GalateaLink:
 
         self.gamestate.current_valid_actions = macro_actions
         return self.gamestate.get_snapshot()
+
+    # 在线程中生成复杂宏动作且不修改共享对局状态
+    def _build_macro_actions(
+        self,
+        msg_type,
+        msg_payload,
+        base_actions,
+        probabilities,
+    ):
+        return build_macro_action_pool(
+            msg_type,
+            msg_payload,
+            self.gamestate,
+            base_actions,
+            probabilities,
+            max_actions=self.ai.max_actions,
+        )
+
+    # 熔断本局 Core 推理并发布可供 WebUI 与 AstrBot 观察的原因
+    def _trip_core_circuit_breaker(
+        self,
+        stage: str,
+        time_budget: float,
+        request_id: int | None = None,
+    ) -> None:
+        reason = f"{stage} 超过 {time_budget:.1f} 秒"
+        first_trip = not getattr(self, "_core_circuit_breaker_reason", None)
+        self._core_circuit_breaker_reason = reason
+        _console_print(
+            f"⏱️ Core {reason}，本局停止继续调用 Core 并进入安全回退"
+        )
+        if first_trip:
+            self._publish_event(
+                "core.timed_out",
+                {
+                    "request_id": request_id,
+                    "stage": stage,
+                    "time_budget": time_budget,
+                    "disabled_for_current_duel": True,
+                },
+            )
 
     # 保存每条游戏消息处理后的 LLM 可见观察
     def _capture_llm_observation(self, event_type, snapshot):
@@ -763,6 +911,93 @@ class GalateaLink:
             },
         )
         _console_print(f"🧭 对局视角映射: Core Player {player_id} ({source})")
+
+    # 返回不含完整卡片列表的当前卡组提交快照
+    def _deck_snapshot(self):
+        deck = self.deck
+        return {
+            "deck_ref": getattr(
+                self,
+                "deck_reference",
+                getattr(deck, "reference", getattr(deck, "name", "unknown")),
+            ),
+            "display_name": getattr(deck, "name", "unknown"),
+            "source": copy.deepcopy(getattr(deck, "source", {})),
+            "counts": {
+                "main": len(deck.main),
+                "extra": len(deck.extra),
+                "side": len(deck.side),
+            },
+        }
+
+    # 使用 YGOPro 主额外合并区与备牌区格式提交当前卡组
+    async def _submit_current_deck(self, *, retry_ready=False):
+        snapshot = self._deck_snapshot()
+        await self.client.send_deck(
+            self.deck.main,
+            self.deck.extra,
+            self.deck.side,
+        )
+        snapshot["loaded"] = True
+        snapshot["submitted"] = True
+        snapshot["ready_retried"] = False
+        if retry_ready and self.ai_player_id in (0, 1, 2, 3):
+            await self.client.send_ready()
+            self._ready_seat = self.ai_player_id
+            snapshot["ready_retried"] = True
+            self._publish_event(
+                "room.ready.requested",
+                {"player_id": self.ai_player_id, "retry": True},
+            )
+        self.last_deck_submission = copy.deepcopy(snapshot)
+        self._publish_event("room.deck.submitted", snapshot)
+        return snapshot
+
+    # 从会话卡组文件重新加载并在大厅中重新上传准备
+    async def reload_deck_from_storage(self):
+        if self.duel_active:
+            raise RuntimeError("决斗进行中不能重新加载卡组")
+        deck = load_deck(
+            str(LINK_DATA_ROOT / "decks"),
+            self.deck_reference,
+        )
+        if deck is None:
+            raise FileNotFoundError("当前会话卡组文件已经不存在")
+        self.deck = deck
+        core_player_id = getattr(self, "ai_core_player_id", None)
+        if core_player_id == 1:
+            self.gamestate.p0_deck = []
+            self.gamestate.p0_extra = []
+            self.gamestate.p1_deck = list(deck.main)
+            self.gamestate.p1_extra = list(deck.extra)
+        else:
+            self.gamestate.p0_deck = list(deck.main)
+            self.gamestate.p0_extra = list(deck.extra)
+            self.gamestate.p1_deck = []
+            self.gamestate.p1_extra = []
+        if self.llm_client is not None and self.llm_config.cache_static_context:
+            self.llm_client.set_static_context(
+                build_llm_static_context(
+                    deck.main,
+                    deck.extra,
+                    deck_name=deck.name,
+                    agent_name=self.agent_name,
+                    include_card_text=self.llm_config.cache_deck_text,
+                )
+            )
+        if (
+            getattr(self.client, "is_connected", False)
+            and self.ai_player_id in (0, 1, 2, 3)
+        ):
+            return await self._submit_current_deck(retry_ready=True)
+        snapshot = self._deck_snapshot()
+        snapshot["loaded"] = True
+        snapshot["submitted"] = False
+        snapshot["ready_retried"] = False
+        snapshot["pending_room_upload"] = True
+        self.last_deck_submission = copy.deepcopy(snapshot)
+        self._publish_event("room.deck.reloaded", snapshot)
+        return snapshot
 
     # 在全部决斗者准备后由房主自动请求开始
     async def _start_duel_if_host_ready(self):
@@ -868,6 +1103,8 @@ class GalateaLink:
         self.last_decision_choice_id = None
         self.last_decision_source = None
         self.latest_chat_suggestion = None
+        self._core_circuit_breaker_reason = None
+        self._macro_actions_disabled_reason = None
 
     # 按介入策略执行 Core、LLM 和规则兜底
     async def _compute_decision(self, request: DecisionRequest):
@@ -1004,20 +1241,33 @@ class GalateaLink:
 
     # 在线程池中计算带概率信息的 Core 建议
     async def _compute_core_decision(self, request: DecisionRequest):
-        if not getattr(self.ai, "model_available", False):
+        if (
+            not getattr(self.ai, "model_available", False)
+            or getattr(self, "_core_circuit_breaker_reason", None)
+        ):
             return None
         try:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                self.policy_executor,
-                functools.partial(
-                    self.ai.get_scored_decision_from_snapshot,
-                    request.snapshot,
-                    request.msg_type,
-                    policy_mode=self.decision_policy.config.core_policy_mode,
-                    temperature=self.decision_policy.config.core_temperature,
-                ),
+            async with asyncio.timeout(
+                self.decision_policy.config.core_time_budget
+            ):
+                return await loop.run_in_executor(
+                    getattr(self, "policy_executor", None),
+                    functools.partial(
+                        self.ai.get_scored_decision_from_snapshot,
+                        request.snapshot,
+                        request.msg_type,
+                        policy_mode=self.decision_policy.config.core_policy_mode,
+                        temperature=self.decision_policy.config.core_temperature,
+                    ),
+                )
+        except TimeoutError:
+            self._trip_core_circuit_breaker(
+                "decision_inference",
+                self.decision_policy.config.core_time_budget,
+                request.request_id,
             )
+            return None
         except Exception as error:
             _console_print(f"🧠 Core 决策异常: {error}")
             return None
@@ -1026,7 +1276,7 @@ class GalateaLink:
     async def _compute_rule_decision(self, request: DecisionRequest):
         loop = asyncio.get_running_loop()
         decision = await loop.run_in_executor(
-            self.policy_executor,
+            getattr(self, "rule_executor", None),
             functools.partial(
                 get_rule_decision,
                 self._perspective_player_id(),

@@ -1,7 +1,8 @@
-# Galatea Link 可公开提交的配置模板
+# Galatea Link Docker 默认配置，首次启动时复制到持久数据卷
+
 server:
   profile: "ygopro"
-  host: "127.0.0.1"
+  host: "host.docker.internal"
   port: 7911
   password: ""
   protocol_version: 0x1361
@@ -12,7 +13,7 @@ server:
   trace_packets: false
 
 service:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8765
   api_token: ""
   api_token_env: "GALATEA_LINK_API_TOKEN"
@@ -29,17 +30,13 @@ model:
   device: "cpu"
   weights_path: "./models/galatea_model.onnx"
   expected_model_id: ""
-  protocol: "auto"
-  inference_backend: "auto"
+  protocol: "v3"
+  inference_backend: "onnxruntime"
   onnx_providers: ["CPUExecutionProvider"]
   onnx_intra_op_threads: 0
   assets_path: ""
   strict_asset_hashes: true
-  config:
-    d_model: 512
-    n_heads: 8
-    n_layers: 6
-    vocab_size: 20000
+  config: {}
 
 llm:
   enabled: false

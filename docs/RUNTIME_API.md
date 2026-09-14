@@ -89,6 +89,8 @@ updated = await link.runtime.update_controls(
 
 支持 `core_only`、`llm_only`、`llm_review` 和 `hybrid`。`core_policy_mode: greedy` 使用确定性最高分动作；`deployment` 按 `core_temperature` 的 softmax 分布采样，范围为 0.05 到 5.0，可用于 core-only、hybrid 和其他会执行 Core 推理的模式
 
+`core_time_budget` 限制一次 Core 推理或复杂宏动作预处理。超时会发布 `core.timed_out` 或 `decision.preprocessing.timed_out`，本局熔断对应本地计算路径，并继续使用 AstrBot、内置 LLM 或独立 RuleBot。`GET /api/v1/status` 的 `core_model.runtime_available`、`core_model.circuit_breaker_reason` 和 `decision.macro_actions_disabled_reason` 可用于定位这种降级
+
 直接调用 `link.runtime.update_controls` 只更新当前运行实例。通过 Link 服务的 `PATCH /api/v1/controls` 更新时，即使会话尚未启动也可修改，并把非敏感基线保存到 `link_state.json` 供后续会话复用
 
 ## 配置中心边界
@@ -212,6 +214,9 @@ await link.runtime.publish_external_message(
 - `agent.decision.requested`
 - `agent.decision.closed`
 - `core.suggested`
+- `core.timed_out`
+- `decision.preprocessing.timed_out`
+- `decision.preprocessing.failed`
 - `llm.requested`
 - `llm.completed`
 - `llm.timed_out`
@@ -232,10 +237,9 @@ await link.runtime.publish_external_message(
 - `external.message.received`
 - `runtime.controls.updated`
 - `service.configuration.updated`
-
-`duel.result` 在解析到 Core `MSG_WIN` 时立即提供己方视角的 `outcome`、赢家、原因码、原因说明和结束类型。`duel.ended` 在服务端结束包、断线或主动停止时统一发布；没有收到胜负消息时会明确使用 `outcome: unknown`，不会猜测赢家
-
-Link 处于房主身份时会维护大厅准备状态。在单人对战的 0、1 号决斗者均准备后自动发送标准 `CTOS_HS_START`，并以 `room.start.requested` 暴露本次自动开始请求
+- `room.deck.submitted`
+- `room.deck.reloaded`
+- `room.ready.requested`
 - `service.llm_secret.updated`
 - `integration.astrbot.connected`
 - `integration.astrbot.disconnected`
@@ -244,6 +248,14 @@ Link 处于房主身份时会维护大厅准备状态。在单人对战的 0、1
 - `runtime.autonomy.ignored`
 - `server.error`
 - `message.processing_failed`
+
+`duel.result` 在解析到 Core `MSG_WIN` 时立即提供己方视角的 `outcome`、赢家、原因码、原因说明和结束类型。`duel.ended` 在服务端结束包、断线或主动停止时统一发布；没有收到胜负消息时会明确使用 `outcome: unknown`，不会猜测赢家
+
+Link 处于房主身份时会维护大厅准备状态。在单人对战的 0、1 号决斗者均准备后自动发送标准 `CTOS_HS_START`，并以 `room.start.requested` 暴露本次自动开始请求
+
+`room.deck.submitted` 会公开实际加载并提交的主卡、额外卡组和备牌数量，但不会公开完整卡片列表。YGOPro 上传格式将主卡组与额外卡组合并计入第一段，将备牌单独计入第二段
+
+当 `server.error` 的 `category` 为 `deck_rejected` 时，载荷会包含 `violation`、中文 `reason`、原始 `error_code`，并按错误类型提供 `card_code`、`card_name` 或 `reported_count`。卡组被拒后 Link 会解除本地准备锁；大厅内重新编辑当前 AstrBot 临时卡组会触发重载、重新上传和再次准备
 
 ## 背压行为
 
