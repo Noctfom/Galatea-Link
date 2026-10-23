@@ -2,7 +2,7 @@
 
 FROM python:3.11-slim
 
-ARG LINK_VERSION=3.1.0
+ARG LINK_VERSION=3.2.0
 ARG LINK_REQUIREMENTS=requirements-onnx.txt
 
 LABEL org.opencontainers.image.title="Galatea Link" \

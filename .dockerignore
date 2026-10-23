@@ -1,5 +1,7 @@
 # 版本控制和开发缓存
 .git/
+.dsh-reference/
+.dsh-plugin-stage/
 .github/
 .vscode/
 .idea/

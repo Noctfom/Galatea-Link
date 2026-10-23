@@ -11,6 +11,8 @@ htmlcov/
 
 # 本地虚拟环境和编辑器设置
 .venv/
+/.dsh-reference/
+/.dsh-plugin-stage/
 venv/
 env/
 .vscode/

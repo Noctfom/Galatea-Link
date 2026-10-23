@@ -101,14 +101,14 @@ Link 服务启动时先读取 `config.yaml`，然后读取同目录下的本地�
 | `cache_deck_text` | `false` | 把整副卡组文本加入固定前缀，首次输入会明显增大 |
 | `compact_dynamic_observation` | `true` | 删除动态观察里已经存在于固定前缀的内容 |
 
-当 `decision.agent_backend` 为 `remote_astrbot` 时，Link 不调用这里配置的模型，但仍保留配置供切回本地智能体
+当 `decision.agent_backend` 为 `remote_astrbot` 或 `remote_dsh` 时，Link 不调用这里配置的模型，而是复用外部主智能体；本地配置继续保留供切回使用
 
 ## `decision` 决策与介入
 
 | 字段 | 默认或示例 | 说明 |
 | --- | --- | --- |
 | `mode` | `core_only` | `core_only`、`hybrid`、`llm_review` 或 `llm_only` |
-| `agent_backend` | `local` | `local` 或 `remote_astrbot` |
+| `agent_backend` | `local` | `local`、`remote_astrbot` 或 `remote_dsh`，仅替换 LLM 来源 |
 | `core_policy_mode` | `greedy` | `greedy` 取最高分，`deployment` 按温度采样 |
 | `core_temperature` | `0.8` | Core deployment 温度，范围 0.05–5 |
 | `core_confidence_threshold` | `0.65` | hybrid 模式触发 LLM 的 Core 置信度阈值，范围 0–1 |

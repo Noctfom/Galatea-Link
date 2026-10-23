@@ -25,7 +25,10 @@ class RemoteDecisionBroker:
         return copy.deepcopy(self._pending)
 
     # 发布固定时点观察并等待远程智能体在预算内返回动作
-    async def decide(self, request_id: int, observation: dict, budget: float) -> LlmDecision:
+    async def decide(
+        self, request_id: int, observation: dict, budget: float,
+        *, backend: str = "remote_astrbot",
+    ) -> LlmDecision:
         if self._future is not None:
             raise RuntimeError("已有远程决策请求尚未结束")
         future = asyncio.get_running_loop().create_future()
@@ -33,6 +36,7 @@ class RemoteDecisionBroker:
         self._deadline = time.monotonic() + budget
         self._pending = {
             "schema_version": "galatea.remote_decision.v1",
+            "agent_backend": backend,
             "session_id": self.session_id,
             "request_id": request_id,
             "observation_id": observation.get("observation_id"),
@@ -60,6 +64,12 @@ class RemoteDecisionBroker:
             raise RuntimeError("远程决策会话不匹配")
         if payload.get("observation_id") != pending["observation_id"]:
             raise RuntimeError("远程决策观察版本不匹配")
+        submitted_backend = payload.get("agent_backend")
+        if (
+            submitted_backend is not None and submitted_backend != pending["agent_backend"]
+            or pending["agent_backend"] == "remote_dsh" and submitted_backend != "remote_dsh"
+        ):
+            raise RuntimeError("远程决策智能体后端不匹配")
         choice_id = payload.get("choice_id")
         allowed = {
             item["choice_id"]

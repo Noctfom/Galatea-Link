@@ -5,9 +5,9 @@ services:
     build:
       context: .
       args:
-        LINK_VERSION: "3.1.0"
+        LINK_VERSION: "3.2.0"
         LINK_REQUIREMENTS: "requirements-onnx.txt"
-    image: galatea-link:3.1.0
+    image: galatea-link:3.2.0
     restart: unless-stopped
     init: true
     read_only: true

@@ -1132,7 +1132,8 @@ class GalateaLink:
             request.msg_type,
             core_decision,
         )
-        remote_agent = self.decision_policy.config.agent_backend == "remote_astrbot"
+        agent_backend = self.decision_policy.config.agent_backend
+        remote_agent = agent_backend in {"remote_astrbot", "remote_dsh"}
         if should_use_llm and (remote_agent or self.llm_client is not None) and request.observation:
             self._publish_event(
                 "llm.requested",
@@ -1164,6 +1165,7 @@ class GalateaLink:
                             request.request_id,
                             llm_observation,
                             self.decision_policy.config.llm_time_budget,
+                            backend=agent_backend,
                         )
                     else:
                         llm_decision = await self.llm_client.decide(llm_observation)
@@ -1190,7 +1192,7 @@ class GalateaLink:
                 )
                 return DecisionOutcome(
                     response=response,
-                    source="astrbot" if remote_agent else "llm",
+                    source={"remote_astrbot": "astrbot", "remote_dsh": "dsh"}.get(agent_backend, "llm"),
                     choice_id=llm_decision.choice_id,
                     reason=llm_decision.reason,
                     chat_message=llm_decision.chat_message,

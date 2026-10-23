@@ -228,7 +228,7 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
         health = await self.client.get("/api/v1/health")
         self.assertEqual(health.status, 200)
         self.assertEqual(self.created, [])
-        self.assertEqual((await health.json())["data"]["version"], "3.1.0")
+        self.assertEqual((await health.json())["data"]["version"], "3.2.0")
 
         unauthorized = await self.client.get("/api/v1/status")
         self.assertEqual(unauthorized.status, 401)

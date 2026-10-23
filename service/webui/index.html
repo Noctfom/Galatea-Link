@@ -114,6 +114,11 @@
               <strong id="astrbotMetric">未连接</strong>
               <small id="astrbotMetricNote">等待插件心跳</small>
             </article>
+            <article class="metric-card">
+              <span>DeepSeek Harness</span>
+              <strong id="dshMetric">未连接</strong>
+              <small id="dshMetricNote">等待插件心跳</small>
+            </article>
           </div>
 
           <div class="panel-grid overview-grid">
@@ -271,6 +276,7 @@
                     <div><dt>PyTorch</dt><dd id="pytorchDependencyValue">—</dd></div>
                     <div><dt>ONNX Runtime</dt><dd id="onnxDependencyValue">—</dd></div>
                     <div><dt>AstrBot 集成</dt><dd id="astrbotIntegrationValue">等待心跳</dd></div>
+                    <div><dt>DeepSeek Harness 集成</dt><dd id="dshIntegrationValue">等待心跳</dd></div>
                     <div><dt>配置应用</dt><dd id="configurationApplyValue">—</dd></div>
                   </dl>
                   <div id="configurationRestartNotice" class="inline-alert is-warning" hidden>当前会话继续使用启动时配置，新设置会在重启 Link 后生效</div>
@@ -361,6 +367,7 @@
                   <select id="agentBackendInput">
                     <option value="local">Link 内置 LLM</option>
                     <option value="remote_astrbot">AstrBot 主智能体</option>
+                    <option value="remote_dsh">DeepSeek Harness 主智能体</option>
                   </select>
                   <small>决定 llm-only、llm-review 和 hybrid 由哪个智能体处理</small>
                 </label>

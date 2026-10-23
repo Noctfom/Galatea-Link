@@ -11,6 +11,7 @@ from core.link_events import EventStreamClosed, LinkEventBus, LinkEventSubscript
 from service.model_repository import LinkModelRepository
 from service.asset_manager import LinkAssetManager
 from service.deck_repository import LinkDeckRepository
+from service.external_integrations import ExternalIntegrationRegistry
 from service.settings_store import LinkServiceSettingsStore
 from core.runtime_controls import apply_decision_control_patch
 from service.configuration import build_configuration_snapshot, require_bool, require_float, require_int, validate_editable_configuration
@@ -63,6 +64,7 @@ class LinkSessionManager:
         self._session_config: Any | None = None
         self._session_deck_scope_id: str | None = None
         self._astrbot_clients: dict[str, dict[str, Any]] = {}
+        self._dsh_integration = ExternalIntegrationRegistry("dsh", self._events)
 
     # 返回当前是否持有仍在执行的游戏任务
     @property
@@ -92,6 +94,7 @@ class LinkSessionManager:
             "configured_model": self._settings.get_model_selection(),
             "integrations": {
                 "astrbot": self.get_astrbot_integration_status(),
+                "dsh": self._dsh_integration.status(),
             },
             "runtime": runtime_status,
         }
@@ -165,6 +168,12 @@ class LinkSessionManager:
             "active_count": sum(1 for item in clients if item["connected"]),
             "clients": clients[:8],
         }
+
+    # 记录 dsh 插件连接并附带当前服务状态
+    def record_dsh_heartbeat(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        result = self._dsh_integration.record(payload)
+        result["link"] = {"state": self._state, "running": self.is_running, "generation": self._generation}
+        return result
 
     # 按需构建 Link 并启动单个游戏会话
     async def start(self) -> dict[str, Any]:
@@ -473,7 +482,7 @@ class LinkSessionManager:
         decks = self._decks.discover(scope_id=scope_id)
         return {
             "schema_version": "galatea.link.deck_catalog.v1",
-            "scope": "current_astrbot_session" if scope_id else "link_local",
+            "scope": "current_dsh_session" if scope_id and scope_id.startswith("dsh:") else "current_astrbot_session" if scope_id else "link_local",
             "decks": decks,
         }
 

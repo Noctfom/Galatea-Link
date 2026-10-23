@@ -132,7 +132,7 @@ Compose 默认安装 `requirements-onnx.txt`，适合 CPU ONNX 部署且镜像�
 需要加载 PTH 模型时可以构建 PyTorch 变体：
 
 ```bash
-docker build --build-arg LINK_REQUIREMENTS=requirements-pytorch.txt --build-arg LINK_VERSION=3.1.0 -t galatea-link:3.1.0-pytorch .
+docker build --build-arg LINK_REQUIREMENTS=requirements-pytorch.txt --build-arg LINK_VERSION=3.2.0 -t galatea-link:3.2.0-pytorch .
 ```
 
 随后在自定义 Compose 中使用该镜像，并把 `config.yaml` 的 `model.inference_backend` 改为 `pytorch`。GPU 容器还需要宿主机 NVIDIA 驱动、Container Toolkit 和与设备匹配的 PyTorch 构建，本项目的默认 Compose 不预设 GPU 权限

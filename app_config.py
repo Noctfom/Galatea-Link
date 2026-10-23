@@ -335,7 +335,7 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
     if decision_mode not in {"core_only", "llm_only", "llm_review", "hybrid"}:
         raise ValueError("配置项 decision.mode 不受支持")
     agent_backend = str(decision_raw.get("agent_backend", "local")).strip().casefold()
-    if agent_backend not in {"local", "remote_astrbot"}:
+    if agent_backend not in {"local", "remote_astrbot", "remote_dsh"}:
         raise ValueError("配置项 decision.agent_backend 不受支持")
     confidence_threshold = float(
         decision_raw.get("core_confidence_threshold", 0.65)

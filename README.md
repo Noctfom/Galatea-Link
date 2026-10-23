@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.1.0-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.2.0-6b8f71)
 
 </div>
 
@@ -90,8 +90,11 @@ sh start_linux.sh
 
 - `local`：Link 直接调用 `llm` 段配置的 API
 - `remote_astrbot`：Link 发布玩家可见观察，AstrBot 主智能体调用动作提交工具
+- `remote_dsh`：dsh 复用当前模型、人格与会话上下文，通过独立限时任务提交动作
 
 切换为 `remote_astrbot` 只替换 LLM 后端，不会强制改变当前决策模式。Core 是否先执行以及 AstrBot 在哪些时点介入，仍由上表的模式、置信度阈值和自主调整策略决定
+
+DeepSeek Harness 接入遵循相同规则。独立 `Galatea_Link_DSH` 插件包含原生工具、异步桥接和可交给 dsh 执行的安装检查说明，详见 [dsh 对接文档](docs/DSH_BRIDGE.md)
 
 四类超时彼此独立：
 
@@ -165,6 +168,7 @@ python scripts/audit_release_privacy.py
 - [异步运行时接口](docs/RUNTIME_API.md)：Python API、事件、观察和远程动作提交
 - [LLM 对局信息契约](docs/LLM_INFORMATION.md)：LLM 能看到什么、缓存和信息边界
 - [AstrBot 远程桥接](docs/ASTRBOT_BRIDGE.md)：插件安装、Pages、工具和会话隔离
+- [DeepSeek Harness 对接](docs/DSH_BRIDGE.md)：dsh 原生工具、后台决策和安装检查
 - [模型协议适配](docs/MODEL_PROTOCOL_ADAPTERS.md)：V3、PTH/ONNX、GKG 和后续版本扩展
 - [安全与隐私](docs/SECURITY.md)：密钥、卡组、日志与 Git 上传检查
 - [更新记录](CHANGELOG.md)：从 Link 3.0.0 开始的软件版本记录

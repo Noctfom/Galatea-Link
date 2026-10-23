@@ -408,6 +408,11 @@ class LinkDeckRepository:
             "imported_at": imported_at,
             "expires_at": imported_at + ASTRBOT_DECK_TTL_SECONDS,
         }
+        source_provider = str(payload.get("source_provider", "astrbot"))
+        if source_provider not in {"astrbot", "dsh"}:
+            raise ValueError("卡组接入来源不受支持")
+        if source_provider == "dsh":
+            source.update(kind="dsh_session", label="当前 dsh 会话导入的临时卡组", provider="dsh")
         existing_source = existing_metadata.get("source")
         if (
             deck_path.is_file()
@@ -519,6 +524,8 @@ class LinkDeckRepository:
             "imported_at": copied_at,
             "expires_at": copied_at + ASTRBOT_DECK_TTL_SECONDS,
         }
+        if scope_id.startswith("dsh:"):
+            source["provider"] = "dsh"
         existing_source = existing_metadata.get("source")
         if (
             deck_path.is_file()
@@ -617,7 +624,7 @@ class LinkDeckRepository:
         metadata = dict(metadata)
         source = dict(metadata.get("source") or {})
         edited_at = time.time()
-        source["modified_by"] = "AstrBot 主智能体"
+        source["modified_by"] = "dsh 主智能体" if source.get("provider") == "dsh" else "AstrBot 主智能体"
         source["content_modified"] = True
         source["last_edited_at"] = edited_at
         source["expires_at"] = edited_at + ASTRBOT_DECK_TTL_SECONDS

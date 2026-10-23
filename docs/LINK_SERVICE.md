@@ -12,7 +12,7 @@ YGOPro 兼容客户端 ── YGOPro 协议 ── Link 服务 ── HTTP/WebSo
 
 三类版本彼此独立
 
-- Link 软件版本当前为 `3.1.0`
+- Link 软件版本当前为 `3.2.0`
 - 游戏网络层面向 YGOPro 协议，可连接采用兼容协议的客户端与服务端
 - 模型协议当前首个稳定版本为 V3，已知 Core 3.6.3 至 3.6.5 产生兼容制品
 - 外部接口固定为 `galatea.link.api.v1`
@@ -106,6 +106,7 @@ galatea_link:
 - `PATCH /api/v1/configuration` 保存下一次会话使用的非敏感配置
 - `PUT /api/v1/configuration/llm-api-key` 保存或清除 Link 本机 LLM API Key
 - `POST /api/v1/integrations/astrbot/heartbeat` 登记 AstrBot 插件连接状态
+- `POST /api/v1/integrations/dsh/heartbeat` 登记 DeepSeek Harness 插件连接状态
 - `POST /api/v1/configuration/server/test` 对草稿服务器执行纯 TCP 连通测试
 - `POST /api/v1/configuration/llm/test` 对草稿 LLM 执行一次最小结构化输出测试
 - `PATCH /api/v1/models/selection` 保存下次会话使用的模型

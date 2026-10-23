@@ -493,6 +493,11 @@ function updateRuntimeAvailability() {
 // 将完整服务状态同步到概览和诊断面板
 function renderStatus(status) {
   appState.session = status;
+  const dsh = status?.integrations?.dsh || {};
+  setText("#dshIntegrationValue", dsh.connected ? `${dsh.active_count} 个实例已连接` : "未收到插件心跳");
+  setText("#dshMetric", dsh.connected ? "已连接" : "未连接");
+  const activeDsh = (dsh.clients || []).find((item) => item.connected);
+  setText("#dshMetricNote", activeDsh ? `${activeDsh.instance_name} · ${activeDsh.age_seconds} 秒前` : "等待插件心跳");
   query("#rawStatusData").textContent = formatJson(status);
   const runtime = status?.runtime;
   const astrbot = status?.integrations?.astrbot || {};

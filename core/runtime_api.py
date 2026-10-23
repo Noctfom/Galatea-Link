@@ -778,7 +778,7 @@ class GalateaRuntimeApi:
 
     # 校验统一控制配置内部的范围和依赖关系
     def _validate_controls_config(self, config) -> None:
-        if config.agent_backend not in {"local", "remote_astrbot"}:
+        if config.agent_backend not in {"local", "remote_astrbot", "remote_dsh"}:
             raise ValueError("智能体后端不受支持")
         if config.core_policy_mode not in {"greedy", "deployment"}:
             raise ValueError("Core 动作策略不受支持")

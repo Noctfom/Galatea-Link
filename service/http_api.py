@@ -242,6 +242,7 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "supported": True,
                 "protocol": "galatea.remote_decision.v1",
                 "pending_observation": True,
+                "backends": ["remote_astrbot", "remote_dsh"],
                 "submit_endpoint": "/api/v1/decisions/{request_id}",
             },
             "inference_backends": {
@@ -286,6 +287,12 @@ async def handle_astrbot_heartbeat(request: web.Request) -> web.Response:
     payload = await _read_json_mapping(request)
     result = request.app[MANAGER_KEY].record_astrbot_heartbeat(payload)
     return _json_response(result)
+
+
+# 接收 dsh 插件心跳以展示独立接入状态
+async def handle_dsh_heartbeat(request: web.Request) -> web.Response:
+    payload = await _read_json_mapping(request)
+    return _json_response(request.app[MANAGER_KEY].record_dsh_heartbeat(payload))
 
 
 # 启动游戏会话且允许重复请求安全复用
@@ -837,6 +844,7 @@ def create_http_app(
             web.post("/api/v1/auth/session", handle_auth_session),
             web.get("/api/v1/status", handle_status),
             web.post("/api/v1/integrations/astrbot/heartbeat", handle_astrbot_heartbeat),
+            web.post("/api/v1/integrations/dsh/heartbeat", handle_dsh_heartbeat),
             web.post("/api/v1/session/start", handle_session_start),
             web.post("/api/v1/session/configure", handle_session_configure),
             web.get("/api/v1/session/configuration", handle_session_configuration),

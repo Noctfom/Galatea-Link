@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping
 
 VALID_INTERVENTION_MODES = {"core_only", "llm_only", "llm_review", "hybrid"}
 VALID_CORE_POLICY_MODES = {"greedy", "deployment"}
-VALID_AGENT_BACKENDS = {"local", "remote_astrbot"}
+VALID_AGENT_BACKENDS = {"local", "remote_astrbot", "remote_dsh"}
 
 
 # 校验并规范化强制介入的 OCG 消息类型

@@ -101,7 +101,7 @@ updated = await link.runtime.update_controls(
 
 AstrBot 可通过 `POST /api/v1/external-message` 把 QQ 消息投递为 `external.message.received` 事件。Link 只负责异步转发和记录事件，不会自动把社交消息写入游戏协议或强行触发 LLM 请求；社交会话编排由 AstrBot 负责
 
-当决策配置的 `agent_backend` 为 `remote_astrbot` 时，Link 会在需要远程判断的时点发布 `agent.decision.requested`。事件包含 `session_id`、`request_id`、`observation_id`、过期时间、玩家可见观察和合法动作列表。AstrBot 插件应在原有主智能体上下文中调用决斗工具，最后向 `POST /api/v1/decisions/{request_id}` 提交这些身份字段与 `choice_id`。Link 会拒绝过期、跨会话、观察版本不匹配或不在合法列表中的动作
+当决策配置的 `agent_backend` 为 `remote_astrbot` 或 `remote_dsh` 时，Link 会在需要远程判断的时点发布 `agent.decision.requested`。事件包含 `agent_backend`、`session_id`、`request_id`、`observation_id`、过期时间、玩家可见观察和合法动作列表。接入端应在对应主智能体上下文中处理，向 `POST /api/v1/decisions/{request_id}` 提交身份字段与 `choice_id`。dsh 提交必须额外携带 `agent_backend: remote_dsh`；Link 拒绝过期、跨后端、跨会话、观察不匹配或非法动作
 
 远程会话推荐先调用 `POST /api/v1/session/configure`，在内存中设置服务器地址、端口、密码、卡组和 `agent_backend: remote_astrbot`，再调用启动接口。密码不会进入状态文件或 WebSocket 事件
 
