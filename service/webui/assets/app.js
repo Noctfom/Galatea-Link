@@ -476,9 +476,10 @@ function updateRuntimeAvailability() {
     !authenticated || !(appState.modelCatalog?.packages || []).length
   );
   query("#refreshAssetsButton").disabled = !authenticated;
-  query("#syncCardDataButton").disabled = !authenticated || running || appState.busy.has("card-assets");
-  query("#syncSemanticsButton").disabled = !authenticated || running || appState.busy.has("semantic-assets");
-  query("#rebuildSemanticsButton").disabled = !authenticated || running || appState.busy.has("semantic-assets");
+  const v4AssetsPinned = appState.assetStatus?.semantic_maintenance_supported === false;
+  query("#syncCardDataButton").disabled = !authenticated || running || v4AssetsPinned || appState.busy.has("card-assets");
+  query("#syncSemanticsButton").disabled = !authenticated || running || v4AssetsPinned || appState.busy.has("semantic-assets");
+  query("#rebuildSemanticsButton").disabled = !authenticated || running || v4AssetsPinned || appState.busy.has("semantic-assets");
   query("#updateMetaStaplesButton").disabled = !authenticated || appState.busy.has("meta-staples");
   setText(
     "#strategySaveHint",
@@ -1751,7 +1752,7 @@ function createModelRecord(record, selectedFilename) {
   const footer = document.createElement("footer");
   const assetState = document.createElement("span");
   const button = document.createElement("button");
-  assetState.textContent = record.assets_available ? "配套语义资产可用" : "缺少模型协议 V3 语义资产";
+  assetState.textContent = !record.assets_available ? `缺少模型协议 V${record.model_protocol_version} 运行资产` : record.online_inference_ready === false ? "资产可用 · Link V4 在线适配待验收" : "配套语义资产可用";
   button.type = "button";
   button.className = selected ? "secondary-button" : "primary-button";
   button.textContent = selected ? "当前选择" : "选择模型";
@@ -1850,8 +1851,11 @@ function renderAssetStatus(status) {
   setText("#assetBuilderValue", status?.local_semantic_builder?.available ? "已安装" : "未安装（仅影响本机构建）");
   setText("#assetStapleCountValue", status?.meta_staples?.length ?? 0);
   const badge = query("#semanticStateBadge");
-  badge.textContent = status?.semantic_complete ? "语义资产完整" : "语义资产不完整";
+  badge.textContent = status?.semantic_complete ? (status?.model_protocol_version === 4 ? "V4 编译资产完整 · Link 在线适配待验收" : "语义资产完整") : "语义资产不完整";
   badge.className = status?.semantic_complete ? "status-pill is-success" : "status-pill is-warning";
+  for (const selector of ["#syncCardDataButton", "#syncSemanticsButton", "#rebuildSemanticsButton"]) {
+    query(selector).title = status?.semantic_maintenance_supported === false ? "V4 运行资产需通过匹配的 GKG4 更新，不能套用 V3 维护器" : "";
+  }
   if (!query("#assetCdbUrlInput").value) {
     query("#assetCdbUrlInput").value = status?.defaults?.cdb_url || "";
   }

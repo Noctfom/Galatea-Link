@@ -53,8 +53,8 @@ class ModelProtocolRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write_checkpoint(directory, {
                 "checkpoint_format_version": 3,
-                "model_protocol_version": 4,
-                "net_config": {"model_protocol_version": 4},
+                "model_protocol_version": 5,
+                "net_config": {"model_protocol_version": 5},
             })
             with self.assertRaisesRegex(ValueError, "不支持"):
                 inspect_model_checkpoint(path)

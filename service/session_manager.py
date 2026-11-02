@@ -688,7 +688,7 @@ class LinkSessionManager:
         async with self._control_lock:
             record = await asyncio.to_thread(self._models.get_model, filename)
             if not record.get("assets_available"):
-                raise RuntimeError("所选模型缺少可用的模型协议 V3 语义资产")
+                raise RuntimeError("所选模型缺少匹配其协议的运行资产")
             selection = self._settings.select_model(
                 record,
                 assets_path=record.get("assets_path"),

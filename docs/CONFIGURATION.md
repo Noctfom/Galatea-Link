@@ -69,17 +69,19 @@ Link 服务启动时先读取 `config.yaml`，然后读取同目录下的本地�
 | `device` | `cpu` | PyTorch 设备，例如 `cpu` 或 `cuda` |
 | `weights_path` | `./models/galatea_model.onnx` | PTH 或 ONNX 主制品路径 |
 | `expected_model_id` | 空 | 可选模型 UUID 锁定，非空时不匹配即拒绝加载 |
-| `protocol` | `auto` | `auto` 或显式模型协议，当前推荐 `auto`/`v3` |
+| `protocol` | `auto` | `auto`、`v3` 或 `v4`；V4 当前为离线预览，在线稳定使用 V3 |
 | `inference_backend` | `auto` | `auto`、`pytorch` 或 `onnxruntime` |
 | `onnx_providers` | `CPUExecutionProvider` | ONNX Runtime 执行提供器列表 |
 | `onnx_intra_op_threads` | `0` | ONNX 单算子线程数，0 表示自动 |
-| `assets_path` | 空 | 运行资产目录，空值时自动寻找 `model_assets/v3` |
-| `strict_asset_hashes` | `true` | 严格校验模型声明的语义资产哈希 |
+| `assets_path` | 空 | 运行资产目录，留空按制品协议查找；WebUI 选择时保存对应模型资产目录 |
+| `strict_asset_hashes` | `true` | 严格校验模型声明的语义资产哈希；V4 必需校验始终启用 |
 | `config` | 网络结构字段 | 旧制品或显式构造网络时使用，优先以制品协议元数据为准 |
 
 模型文件、外部数据文件和 GKG 默认被 `.gitignore` 排除。公共仓库只保留加载代码，不应把训练权重随源码意外上传
 
 模型协议是兼容边界，不等同于某个 Galatea Core 发布版本。同为 V3 的后续 Core 版本继续使用 V3 适配器；只有制品协议真正升级时才新增目录
+
+V4 使用 `model_assets/v4/<model_id>`，必需精确词表和编译语义三件套，不读取 V3 资产代替。已加载 V4 模型在 `core_only`、`hybrid` 和 `llm_review` 下会因 Link 在线状态与历史编码尚未验收而拒绝连接；显式 `llm_only` 仍可使用本地或远程 LLM。PTH 语义更新还须通过兼容清单验证，ONNX 保持冻结语义，详见 [V4 接入说明](V4_ADAPTER.md)
 
 ## `llm` Link 内置 LLM
 

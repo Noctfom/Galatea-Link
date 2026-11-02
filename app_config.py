@@ -260,6 +260,8 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
         "v3",
         "core-3.6.3",
         "core-3.6.5",
+        "4",
+        "v4",
     }:
         raise ValueError("配置项 model.protocol 不受支持")
     inference_backend = str(

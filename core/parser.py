@@ -1,86 +1,56 @@
-# core/parser.py
+# 在线游戏消息拆分模块，严格校验消息边界并与模型协议独立
 import io
-from core.gamestate import (
-    INTERACTION_MESSAGE_TYPES,
-    INTERACTION_MIN_PAYLOAD_LENGTHS,
-    MessageParser,
-)
+import struct
+
+from core.gamestate import INTERACTION_MESSAGE_TYPES, INTERACTION_MIN_PAYLOAD_LENGTHS, MessageParser
+
+
+class OCGParseError(ValueError):
+    pass
+
 
 class OCGParser:
-    """
-    负责处理底层 TCP 粘包、拆包，以及拦截未知指令的黑洞雷达
-    """
+    # 按当前兼容的在线布局拆分消息且不猜测 Core 本地缓冲区布局
     @staticmethod
-    def robust_parse(data):
+    def robust_parse(data, *, strict=False):
         msgs = []
         stream = io.BytesIO(data)
         data_len = len(data)
-        last_pos = -1
-        
         while stream.tell() < data_len:
             start = stream.tell()
-
-            # --- 死循环雷达 ---
-            if start == last_pos:
-                stream.seek(start)
-                stuck_type = stream.read(1)[0]
-                print(f"\n🚨 [死循环拦截] 解析器卡死在未知 OCG Type: {stuck_type}")
-                print(f"📦 完整数据包 Hex: {data.hex()}")
-                break 
-            last_pos = start
-
-            start_pos = stream.tell()
-            msg_type = data[start_pos]
-            stream.read(1) # 跳过 msg_type 字节
-
-            minimum_length = INTERACTION_MIN_PAYLOAD_LENGTHS.get(msg_type)
-            available_length = data_len - stream.tell()
-            if minimum_length is not None and available_length < minimum_length:
-                print(
-                    f"[OCG 不完整交互] 忽略 Type {msg_type}: "
-                    f"载荷 {available_length}/{minimum_length} 字节 "
-                    f"Hex: {data[start_pos:].hex()}"
-                )
-                break
-            
-            # 特殊指令长度
-            if msg_type in [4, 6, 8]:
-                length = data_len - start_pos - 1
-            else:
-                length = MessageParser.MSG_LEN.get(msg_type, -1)
-                if length == -1:
-                    try:
+            msg_type = stream.read(1)[0]
+            try:
+                if msg_type == 0 or msg_type not in MessageParser.MSG_LEN and msg_type not in (6, 7, 8):
+                    raise OCGParseError(f"未知在线 OCG 指令 Type {msg_type}，拒绝吞噬剩余字节")
+                available = data_len - stream.tell()
+                minimum = INTERACTION_MIN_PAYLOAD_LENGTHS.get(msg_type, 0)
+                if available < minimum:
+                    raise OCGParseError(f"Type {msg_type} 载荷截断 {available}/{minimum}")
+                if msg_type == 4:
+                    length = 18
+                elif msg_type in (6, 8):
+                    # 整区刷新没有外层长度字段，必须占用独立 STOC_GAME_MSG 载荷
+                    length = available
+                elif msg_type == 7:
+                    if available < 7:
+                        raise OCGParseError("单卡刷新查询头截断")
+                    header = data[stream.tell():stream.tell() + 7]
+                    row_size = struct.unpack_from("<I", header, 3)[0]
+                    if row_size != 4 and row_size < 8:
+                        raise OCGParseError("单卡刷新查询行长度无效")
+                    length = 3 + row_size
+                else:
+                    length = MessageParser.MSG_LEN.get(msg_type, -1)
+                    if length == -1:
                         length = MessageParser.calculate_dynamic_length(msg_type, stream)
-                    except Exception as e:
-                        # 记录异常，防止被静音吞噬
-                        print(f"⚠️ 动态长度计算异常 (Type {msg_type}): {e}")
-                        length = -1
-            
-            if length < 0 and msg_type in INTERACTION_MESSAGE_TYPES:
-                print(
-                    f"[OCG 不完整交互] 忽略无法确定长度的 Type {msg_type} "
-                    f"Hex: {data[start_pos:].hex()}"
-                )
+                if length < 0 or length > data_len - stream.tell():
+                    raise OCGParseError(f"Type {msg_type} 长度无效或载荷截断")
+                payload = stream.read(length)
+                msgs.append((msg_type, payload))
+            except (ValueError, struct.error, IndexError) as error:
+                message = f"[OCG 解析拒绝] offset={start} {error}"
+                if strict:
+                    raise OCGParseError(message) from error
+                print(message)
                 break
-
-            if length >= 0 and stream.tell() + length > data_len:
-                print(
-                    f"[OCG 截断消息] 忽略 Type {msg_type}: "
-                    f"声明载荷 {length} 字节，实际剩余 {data_len - stream.tell()} 字节"
-                )
-                break
-
-            # --- 黑洞截断警告雷达 ---
-            if length < 0:
-                print(f"\n🚨 [黑洞截断警告] 未知 OCG 指令 (Type {msg_type}) 缺失长度定义！")
-                print(f"💥 强行吞噬了剩余的 {data_len - start_pos - 1} 个字节，这将导致后续时点丢失卡死！")
-                print(f"📦 吞噬残骸 Hex: {data[start_pos:].hex()}")
-                
-                length = data_len - start_pos - 1
-                
-            payload = stream.read(length)
-            
-            # 返回拆解好的 tuple: (类型, 载荷)
-            msgs.append((msg_type, payload))
-            
         return msgs

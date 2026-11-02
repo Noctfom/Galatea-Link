@@ -37,7 +37,7 @@ class PyTorchInferenceRuntime:
         self.net.eval()
         with torch.no_grad():
             device_inputs = {
-                key: value.to(self.device)
+                key: (value if hasattr(value, "to") else torch.from_numpy(np.ascontiguousarray(value))).to(self.device)
                 for key, value in observation.items()
             }
             logits, values, value_input = self.net(device_inputs)

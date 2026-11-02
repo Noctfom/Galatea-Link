@@ -95,6 +95,8 @@ class AiBot:
             self.inference_runtime = backend.inference_runtime
             self.encoder = backend.encoder
             self.model_metadata = backend.metadata
+            if backend.metadata.get("semantic_update"):
+                _console_print("♻️ [语义兼容更新] " + backend.metadata["semantic_update"]["message"])
             self.adapter_id = backend.adapter_id
             self.model_protocol_version = backend.metadata["model_protocol_version"]
             self.max_actions = backend.max_actions
@@ -117,6 +119,8 @@ class AiBot:
     # 返回本地 Core 模型是否可以安全参与决策
     @property
     def model_available(self):
+        if (getattr(self, "model_metadata", None) or {}).get("online_inference_ready") is False:
+            return False
         return (
             getattr(self, "inference_runtime", None) is not None
             or getattr(self, "net", None) is not None

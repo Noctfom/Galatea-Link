@@ -13,8 +13,10 @@ from pathlib import Path
 DEFAULT_CARD_DB_PATH = Path(__file__).resolve().parents[1] / "cards.cdb"
 
 class CardReader:
-    def __init__(self, db_path=None):
+    # 初始化独立查询缓存并按需使用只读数据库连接
+    def __init__(self, db_path=None, *, read_only=False):
         self.db_path = str(DEFAULT_CARD_DB_PATH if db_path is None else db_path)
+        self.read_only = bool(read_only)
         self.conn = None
         self.cursor = None
         self.cache = {}
@@ -25,7 +27,8 @@ class CardReader:
         
         if os.path.exists(self.db_path):
             try:
-                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                connection_path = Path(self.db_path).resolve().as_uri() + "?mode=ro" if read_only else self.db_path
+                self.conn = sqlite3.connect(connection_path, check_same_thread=False, uri=read_only)
                 self.cursor = self.conn.cursor()
             except:
                 print("⚠️ 无法连接 cards.cdb")
@@ -49,10 +52,12 @@ class CardReader:
             self.conn = None
 
     # 在保持单例引用不变的情况下重新加载卡片数据库
-    def reload(self, db_path=None):
+    def reload(self, db_path=None, *, read_only=None):
         resolved = str(DEFAULT_CARD_DB_PATH if db_path is None else db_path)
         self.close()
         with self._db_lock:
+            if read_only is not None:
+                self.read_only = bool(read_only)
             self.db_path = resolved
             self.cache.clear()
             self.text_cache.clear()
@@ -62,7 +67,8 @@ class CardReader:
                 print("⚠️ 未找到 cards.cdb")
                 return False
             try:
-                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                connection_path = Path(self.db_path).resolve().as_uri() + "?mode=ro" if self.read_only else self.db_path
+                self.conn = sqlite3.connect(connection_path, check_same_thread=False, uri=self.read_only)
                 self.cursor = self.conn.cursor()
                 return True
             except sqlite3.Error:

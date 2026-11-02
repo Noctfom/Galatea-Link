@@ -43,6 +43,11 @@ MAX_SCRIPT_COMPRESSION_RATIO = 1000
 
 
 class LinkAssetManager:
+    # 阻止旧版语义维护器覆盖按 V4 身份冻结的运行资产
+    def _require_mutable_v3_assets(self) -> None:
+        if "v4" in self.get_active_asset_root().relative_to(self.project_root).parts:
+            raise ValueError("V4 运行资产需通过匹配的 GKG4 更新，不能使用 V3 卡库或语义重建流程")
+
     # 初始化项目资产根目录和当前模型选择读取器
     def __init__(
         self,
@@ -58,15 +63,25 @@ class LinkAssetManager:
     # 解析并约束当前模型选中的资产目录
     def get_active_asset_root(self) -> Path:
         selection = self._selection_provider()
-        raw_path = str(selection.get("assets_path") or "model_assets/v3")
+        pin = str(selection.get("protocol") or "auto").casefold()
+        raw_path = str(selection.get("assets_path") or ("model_assets/v4" if pin in {"4", "v4"} else "model_assets/v3"))
         candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = self.project_root / candidate
         resolved = candidate.resolve()
+        family = "v4" if pin in {"4", "v4"} else "v3"
+        if pin == "auto":
+            try:
+                family = resolved.relative_to(self.project_root / "model_assets").parts[0]
+            except (ValueError, IndexError):
+                pass
+        if family not in {"v3", "v4"}:
+            raise ValueError("模型资产目录不属于支持的协议")
+        protocol_root = self.project_root / "model_assets" / family
         try:
-            resolved.relative_to(self.model_asset_root)
+            resolved.relative_to(protocol_root)
         except ValueError as error:
-            raise ValueError("模型资产目录必须位于 model_assets/v3 内") from error
+            raise ValueError(f"模型资产目录必须位于 model_assets/{protocol_root.name} 内") from error
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
 
@@ -80,9 +95,14 @@ class LinkAssetManager:
                 card_info = validate_card_database(card_path)
             except (OSError, ValueError, sqlite3.Error) as error:
                 card_info = {"error": str(error)}
+        protocol = 4 if "v4" in asset_root.relative_to(self.project_root).parts else 3
+        if protocol == 4:
+            from model_protocols.v4 import REQUIRED_ASSET_FILENAMES as required
+        else:
+            required = REQUIRED_ASSET_FILENAMES
         semantic_files = {
             name: (asset_root / name).is_file()
-            for name in REQUIRED_ASSET_FILENAMES
+            for name in required
         }
         staples = self.get_meta_staples()
         script_count = (
@@ -92,6 +112,8 @@ class LinkAssetManager:
         )
         return {
             "schema_version": "galatea.link.assets.v1",
+            "model_protocol_version": protocol,
+            "semantic_maintenance_supported": protocol == 3,
             "active_asset_path": f"./{asset_root.relative_to(self.project_root).as_posix()}",
             "card_database": {
                 "path": f"./{card_path.relative_to(self.project_root).as_posix()}",
@@ -124,6 +146,7 @@ class LinkAssetManager:
         script_repository: str = DEFAULT_SCRIPT_REPOSITORY,
         force_scripts: bool = False,
     ) -> dict[str, Any]:
+        self._require_mutable_v3_assets()
         normalized_cdb_url = self._validate_remote_url(cdb_url)
         normalized_script_repository = self._validate_remote_url(script_repository)
         asset_root = self.get_active_asset_root()
@@ -166,6 +189,7 @@ class LinkAssetManager:
         self,
         remote_url: str = DEFAULT_SEMANTIC_URL,
     ) -> dict[str, Any]:
+        self._require_mutable_v3_assets()
         normalized_url = self._validate_remote_url(remote_url)
         asset_root = self.get_active_asset_root()
         with tempfile.TemporaryDirectory(
@@ -209,6 +233,7 @@ class LinkAssetManager:
         remote_url: str | None = None,
         clear_existing: bool = False,
     ) -> dict[str, Any]:
+        self._require_mutable_v3_assets()
         if remote_url and clear_existing:
             raise ValueError("远端基座同步与完全本机重建不能同时启用")
         normalized_url = self._validate_remote_url(remote_url) if remote_url else None

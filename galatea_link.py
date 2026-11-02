@@ -151,6 +151,10 @@ class GalateaLink:
         )
         if not self.core_model_loaded:
             _console_print("⚠️ Core 模型不可用，当前进程将使用 LLM 或 RuleBot 安全回退")
+        elif not self.ai.model_available:
+            _console_print(f"⚠️ {self.ai.model_metadata.get('online_block_reason', '模型尚未开放在线推理')}")
+        if self.core_model_loaded and self.ai.model_protocol_version == 4:
+            self.model_assets_path = self.ai.encoder.assets.root
 
         # 让规则回退与可见观察读取当前模型包携带的卡库
         selected_card_database = self.model_assets_path / "cards.cdb"
@@ -161,7 +165,8 @@ class GalateaLink:
                 LINK_DATA_ROOT / "cards.cdb"
                 if (LINK_DATA_ROOT / "cards.cdb").is_file()
                 else LINK_PROJECT_ROOT / "cards.cdb"
-            )
+            ),
+            read_only=True,
         )
 
         _console_print(f"🃏 正在加载卡组: {deck_name}")
@@ -181,6 +186,10 @@ class GalateaLink:
             model_protocol_version=self.ai.model_protocol_version,
             asset_dir=self.model_assets_path,
         )
+        if self.ai.model_protocol_version == 4 and self.core_model_loaded:
+            bindings = self.ai.encoder.assets.lookup.runtime_effect_bindings
+            # 按精确卡密和引擎描述号查询当前模型的独立效果槽目录
+            self.gamestate.effect_slot_resolver = lambda code, desc: bindings.get((code & 0x7FFFFFFF, desc))
         self.ignore_actions_blacklist = [] 
         
         # 动态座位 ID 默认设为 None 并在进房后由服务器指派
@@ -243,6 +252,9 @@ class GalateaLink:
     async def start(self):
         attempted_versions = set()
         try:
+            metadata = getattr(getattr(self, "ai", None), "model_metadata", None) or {}
+            if metadata.get("online_inference_ready") is False and self.decision_policy.config.mode != "llm_only":
+                raise RuntimeError(metadata["online_block_reason"] + "，请暂用 V3 模型或显式选择 llm_only")
             while not self._closed:
                 active_version = int(self.client.protocol_version)
                 self.active_protocol_version = active_version
@@ -330,6 +342,9 @@ class GalateaLink:
                     executor.shutdown(wait=False, cancel_futures=True)
         finally:
             self.duel_active = False
+            assets = getattr(getattr(getattr(self, "ai", None), "encoder", None), "assets", None)
+            if assets is not None:
+                assets.close()
             self._publish_event("link.closed")
             self.event_bus.close()
 
@@ -564,7 +579,7 @@ class GalateaLink:
                     )
 
             elif msg_type == 0x01:
-                msgs = OCGParser.robust_parse(msg_data)
+                msgs = OCGParser.robust_parse(msg_data, strict=True)
 
                 for ocg_type, ocg_payload in msgs:
                     raw_msg = bytes([ocg_type]) + ocg_payload
@@ -624,7 +639,7 @@ class GalateaLink:
                     )
                     self._capture_llm_observation(ocg_type, snapshot)
 
-                    if self.gamestate.current_valid_actions:
+                    if ocg_type in INTERACTION_MESSAGE_TYPES and self.gamestate.current_valid_actions:
                         # 服务端只把完整交互消息发给需要作答的决斗客户端
                         if self.ai_player_id in (0, 1):
                             self.last_prompt_type = ocg_type # 记录当前提示类型，供 Retry 使用
@@ -641,6 +656,20 @@ class GalateaLink:
                 {"server_message_type": msg_type, "error": str(e)},
             )
             traceback.print_exc()
+            if msg_type == 0x01:
+                await self._abort_protocol_failure()
+
+    # 中止已失去可信解析的连接并取消旧决策以免继续发送过期动作
+    async def _abort_protocol_failure(self):
+        self.gamestate.current_valid_actions = []
+        coordinator = getattr(self, "decision_coordinator", None)
+        if coordinator is not None:
+            await coordinator.cancel_active()
+        if getattr(self, "duel_active", False):
+            await self._finish_duel("protocol_error")
+        client_close = getattr(getattr(self, "client", None), "close", None)
+        if client_close is not None:
+            await client_close()
 
     # 创建独立快照并提交后台决策任务
     async def _schedule_decision(self, msg_type, raw_msg, snapshot=None):
@@ -1061,6 +1090,7 @@ class GalateaLink:
             reason_names = {
                 "connection_lost": "连接中断",
                 "link_stopped": "Link 会话被主动停止",
+                "protocol_error": "在线消息解析或玩家视角校验失败，已停止连接",
                 "server_leave": "玩家离开或房间关闭",
                 "server_duel_end": "服务端结束对局但未收到胜负消息",
             }

@@ -14,7 +14,7 @@ from training_validation import validate_model_prefix
 LEGACY_ADAPTER_ID = "core-3.4.2-model-v1"
 LEGACY_CHECKPOINT_FORMAT_VERSION = 1
 LEGACY_MODEL_PROTOCOL_VERSION = 1
-SUPPORTED_PROTOCOLS = (LEGACY_MODEL_PROTOCOL_VERSION, 3)
+SUPPORTED_PROTOCOLS = (LEGACY_MODEL_PROTOCOL_VERSION, 3, 4)
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,10 @@ def inspect_model_checkpoint(path: str | Path) -> dict[str, Any]:
         if configured_protocol != 3:
             raise ValueError("V3 检查点的网络配置缺少 model_protocol_version=3")
         protocol = 3
+    elif checkpoint_format == 3 and explicit_protocol == 4:
+        from .v4.backend import inspect_v4_metadata
+        inspect_v4_metadata(checkpoint)
+        protocol = 4
     else:
         raise ValueError(
             "不支持的模型检查点协议 "
@@ -70,7 +74,7 @@ def inspect_model_checkpoint(path: str | Path) -> dict[str, Any]:
             f"supported={SUPPORTED_PROTOCOLS}"
         )
 
-    return {
+    result = {
         "checkpoint_format_version": checkpoint_format,
         "model_protocol_version": protocol,
         "model_id": checkpoint.get("model_id"),
@@ -79,6 +83,13 @@ def inspect_model_checkpoint(path: str | Path) -> dict[str, Any]:
         "run_id": checkpoint.get("run_id"),
         "net_config": dict(net_config) if isinstance(net_config, dict) else {},
     }
+    if protocol == 4:
+        from .v4.assets import PROTOCOL_IDENTITY_KEYS
+        result.update({key: checkpoint[key] for key in PROTOCOL_IDENTITY_KEYS})
+        result.update({key: checkpoint[key] for key in ("training_stage", "training_lineage") if key in checkpoint})
+        if "semantic_compatibility" in checkpoint:
+            result["semantic_compatibility"] = checkpoint["semantic_compatibility"]
+    return result
 
 
 # 将外部协议固定值转换为内部数字并保留自动识别
@@ -97,6 +108,8 @@ def _normalize_protocol_pin(protocol: str | int | None) -> int | None:
         "v3": 3,
         "core-3.6.3": 3,
         "core-3.6.5": 3,
+        "4": 4,
+        "v4": 4,
     }
     if normalized not in aliases:
         raise ValueError(f"未知模型协议固定值: {protocol!r}")
@@ -270,6 +283,9 @@ def inspect_onnx_artifact(path: str | Path) -> dict[str, Any]:
     onnx_record = manifest.get("onnx")
     if not isinstance(onnx_record, dict):
         raise ValueError("ONNX 轮次清单缺少 onnx 记录")
+    if manifest.get("model_protocol_version") == 4:
+        from .v4.backend import inspect_v4_onnx
+        return inspect_v4_onnx(graph_path, manifest)
     if manifest.get("artifact_manifest_version") != 2:
         raise ValueError("模型协议 V3 仅支持制品清单版本 2")
     if manifest.get("model_protocol_version") != 3:
@@ -423,6 +439,9 @@ def load_model_backend(
                 "模型 UUID 校验失败 "
                 f"期望 {expected_model_id} 实际 {inspected['model_id']}"
             )
+        if inspected["model_protocol_version"] == 4:
+            from .v4.backend import load_v4_backend
+            return load_v4_backend(checkpoint_path, inspected, asset_path=asset_path, providers=tuple(onnx_providers), intra_op_threads=int(onnx_intra_op_threads))
         return _load_v3_onnx_backend(
             checkpoint_path,
             inspected,
@@ -450,4 +469,7 @@ def load_model_backend(
             asset_path,
             strict_asset_hashes,
         )
+    if actual_protocol == 4:
+        from .v4.backend import load_v4_backend
+        return load_v4_backend(checkpoint_path, inspected, device=device, asset_path=asset_path)
     raise AssertionError(f"已识别但未注册的模型协议: {actual_protocol}")

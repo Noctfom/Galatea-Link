@@ -1,4 +1,4 @@
-# 模型协议兼容测试脚本，检查元数据并可执行一次完整 V3 推理
+# 模型协议兼容测试脚本，检查元数据并执行 V3 或 V4 的离线推理
 
 import argparse
 import json
@@ -20,7 +20,14 @@ from model_protocols import (
 
 
 # 构建不会依赖在线房间的最小公开测试快照
-def build_smoke_snapshot():
+def build_smoke_snapshot(protocol=3):
+    if protocol == 4:
+        from model_protocols.v4.data_types import CardEntity as Entity4, GameAction as Action4, GameSnapshot as Snapshot4, GlobalFeature as Global4
+        legacy = build_smoke_snapshot(3)
+        global_data = Global4(**vars(legacy.global_data), decision_player=0, turn_player=0, starting_player=0, p0_turn_count=1)
+        entity_fields = {key: value for key, value in vars(legacy.entities[0]).items() if key in Entity4.__dataclass_fields__}
+        return Snapshot4(global_data, [Entity4(**entity_fields)], [Action4(**vars(legacy.valid_actions[0]))],
+                         p0_initial_deck_codes=[89631139], p0_deck_codes=[89631139])
     location = LocationInfo.encode(0, Zone.MZONE, 0, 1)
     entity = CardEntity(
         code=89631139,
@@ -95,8 +102,10 @@ def main():
         asset_path=args.assets or None,
     )
     output_format = "numpy" if backend.runtime_id == "onnxruntime" else "torch"
+    if backend.metadata.get("semantic_update"):
+        print("语义兼容更新: " + backend.metadata["semantic_update"]["message"])
     tensors = backend.encoder.encode(
-        build_smoke_snapshot(),
+        build_smoke_snapshot(metadata["model_protocol_version"]),
         player_id=0,
         output_format=output_format,
     )

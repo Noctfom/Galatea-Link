@@ -21,6 +21,7 @@ from data_types import (
     GlobalFeature,
 )
 from model_protocols.v3.effect_slot_binding import resolve_runtime_effect_slot
+from core.online_state import OnlineStateProjection, QUERY_FIELD_NAMES
 
 # Link 接收标准网络消息流且不解析 Core 本地缓冲区的幽灵字节
 CORE_HAS_GHOST_BYTE = False
@@ -75,7 +76,7 @@ class MessageParser:
     # 基于源码的精确长度定义 (Payload长度)
     # -1: 变长消息，进入 calculate_dynamic_length
     MSG_LEN = {
-        0:-1, 1: 0, 2: 6, 3: 0, 4: 0, 5: 2, 
+        0:-1, 1: 0, 2: 6, 3: 0, 4: 18, 5: 2,
         
         # --- 交互类 ---
         10: -1, 11: -1, 12: 13, 13: 5, 14: -1, 15: -1, 16: -1, 
@@ -447,6 +448,8 @@ class DuelState:
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
         self.model_protocol_version = int(model_protocol_version)
+        self.online_projection = OnlineStateProjection()
+        self.effect_slot_resolver = resolve_runtime_effect_slot
         self.asset_dir = Path(asset_dir).resolve() if asset_dir else None
         self.meta_staples = self._load_meta_staples()
 
@@ -476,6 +479,7 @@ class DuelState:
         return list(DEFAULT_META_STAPLES)
 
     def reset(self):
+        self.online_projection = OnlineStateProjection()
         self.turn = 0
         self.phase = 0
         self.my_lp = 8000
@@ -494,6 +498,20 @@ class DuelState:
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
+        if msg_type == 4:
+            start = self.online_projection.start(msg_payload)
+            self.my_lp, self.op_lp = start["lp"]
+            return
+        if msg_type in (6, 7):
+            self._apply_online_query(msg_type, msg_payload)
+            return
+        if msg_type in INTERACTION_MESSAGE_TYPES and self.online_projection.started:
+            if get_interaction_player_id(msg_type, msg_payload) != self.online_projection.perspective:
+                raise ValueError("交互玩家与 Start 固定的物理座位不一致，拒绝重新认领对手座位")
+        self.online_projection.observe_event(msg_type, msg_payload, hand_counts=tuple(
+            len(self.field_map[player].get(Zone.HAND, {})) for player in (0, 1)))
+        if msg_type == 90 and self.online_projection.last_known_draws:
+            self.known_hand_codes[msg_payload[0]].extend(self.online_projection.last_known_draws)
         minimum_length = INTERACTION_MIN_PAYLOAD_LENGTHS.get(msg_type)
         if minimum_length is not None and len(msg_payload) < minimum_length:
             print(
@@ -610,7 +628,7 @@ class DuelState:
                 )
                 # 只使用稳定版语义资产提供的精确效果槽绑定
                 if self.model_protocol_version >= 3:
-                    effect_slot_idx = resolve_runtime_effect_slot(code, desc)
+                    effect_slot_idx = self.effect_slot_resolver(code, desc)
                 else:
                     legacy_slot = desc & 0xF
                     effect_slot_idx = legacy_slot if legacy_slot < 8 else None
@@ -770,7 +788,7 @@ class DuelState:
         if self.model_protocol_version < 3:
             return
         for action in self.current_valid_actions:
-            slot_index = resolve_runtime_effect_slot(
+            slot_index = self.effect_slot_resolver(
                 getattr(action, 'code', 0),
                 getattr(action, 'desc_id', 0),
             )
@@ -1519,6 +1537,42 @@ class DuelState:
             
             raise RuntimeError(f"Failed to parse valid actions for msg_type {msg_type}: {e}")
 
+    # 原子应用服务器查询且不创建动作或改变决策归属
+    def _apply_online_query(self, msg_type, payload):
+        actor, zone, changes = self.online_projection.refresh(msg_type, payload)
+        if zone == Zone.DECK:
+            return
+        previous = self.field_map[actor].get(zone, {})
+        updated = {} if msg_type == 6 else dict(previous)
+        if msg_type == 6:
+            for index in set(previous) - set(changes):
+                self.online_projection.public_context.forget_instance(actor, zone, index)
+        dynamic_names = {name for names in QUERY_FIELD_NAMES.values() for name in names}
+        for index, fields in changes.items():
+            if fields is None:
+                self.online_projection.public_context.forget_instance(actor, zone, index)
+                updated.pop(index, None)
+                continue
+            old = previous.get(index, {})
+            same = bool(fields.get("code")) and fields.get("code") == (old.get("code", 0) & 0x7FFFFFFF)
+            if fields.get("code") and old.get("code") and not same:
+                self.online_projection.public_context.forget_instance(actor, zone, index)
+            info = {"code": fields.get("code", 0), "pos": fields.get("position", 0), "owner": actor}
+            info.update({name: value for name, value in fields.items() if name not in {"position", "equip_target", "target_locations"}})
+            info["online_query_fields"] = tuple(sorted(set(fields).intersection(dynamic_names)))
+            info["used_effect_mask"] = old.get("used_effect_mask", 0) if same else 0
+            if "counter_count" in fields:
+                info["counters"] = fields["counter_count"]
+            if "overlay_codes" in fields:
+                info["overlays"] = list(fields["overlay_codes"])
+            if fields.get("equip_target"):
+                info["equip_target"] = LocationInfo.decode(fields["equip_target"])[:3]
+                info["is_equipped"] = True
+            if "target_locations" in fields:
+                info["targets"] = [LocationInfo.decode(raw)[:3] for raw in fields["target_locations"]]
+            updated[index] = info
+        self.field_map[actor][zone] = updated
+
     def get_snapshot(self, env=None) -> GameSnapshot:
         """
         生成快照 + 填充 Actions
@@ -1536,13 +1590,13 @@ class DuelState:
             my_hand_len=count_zone(0, Zone.HAND), op_hand_len=count_zone(1, Zone.HAND),
             
             # --- 修复：使用真实的列表长度，而不是通过 field_map 统计 ---
-            my_deck_len=len(self.p0_deck), op_deck_len=len(self.p1_deck),
+            my_deck_len=self.online_projection.counts.get((0, Zone.DECK), len(self.p0_deck)), op_deck_len=self.online_projection.counts.get((1, Zone.DECK), len(self.p1_deck)),
             
             my_grave_len=count_zone(0, Zone.GRAVE), op_grave_len=count_zone(1, Zone.GRAVE),
             my_removed_len=count_zone(0, Zone.REMOVED), op_removed_len=count_zone(1, Zone.REMOVED),
             
             # --- 修复：额外卡组同理 ---
-            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra)
+            my_extra_len=self.online_projection.counts.get((0, Zone.EXTRA), len(self.p0_extra)), op_extra_len=self.online_projection.counts.get((1, Zone.EXTRA), len(self.p1_extra))
         )
 
         entities = []
@@ -1596,7 +1650,7 @@ class DuelState:
                     race = info.get('current_race', stats[1])
                     attr = info.get('current_attr', stats[2])
                     level = info.get('current_level', stats[3])
-                    if level == 0: 
+                    if level == 0 and 'current_level' not in info.get('online_query_fields', ()):
                         level = stats[3]  # 防止超量/Link被 C++ 的 0 星覆写，强制回退取数据库静态星数
 
                     counters = info.get('counters', 0)
@@ -1630,6 +1684,14 @@ class DuelState:
                         'targeted_by': list(info.get('targeted_by', [])),
                     }
                     entities[-1].top_overlay_code = top_overlay_code
+                    entities[-1].query_known_fields = info.get('online_query_fields')
+                    entities[-1].query_sequence = info.get('query_sequence')
+                    for name in ('current_code', 'original_owner', 'current_rank', 'link_rating', 'is_disabled', 'is_forbidden', 'properly_summoned', 'counter_items', 'reason'):
+                        if name in info:
+                            setattr(entities[-1], name, info[name])
+                    for name in ('lscale', 'rscale', 'link_marker', 'base_atk', 'base_def'):
+                        if name in info.get('online_query_fields', ()):
+                            setattr(entities[-1], name, info[name])
                     idx_counter += 1
 
         for entity_index, relations in relation_locations.items():
@@ -1708,6 +1770,14 @@ class DuelState:
         snap.chain_stack = self.chain_stack.copy()
         snap.history_stack = self.history_stack.copy()
         snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
+        snap.online_coverage = self.online_projection.coverage()
+        context = self.online_projection
+        snap.public_hints, snap.known_deck_cards, snap.public_state_flags = context.public_snapshot()
+        snap.public_notifications = tuple(dict(item) for item in context.public_notifications)
+        snap.global_data.turn_player = context.turn_player
+        snap.global_data.starting_player = context.starting_player
+        snap.global_data.p0_turn_count, snap.global_data.p1_turn_count = context.turn_counts
+        snap.global_data.disabled_field_mask = context.disabled_field_mask
         return snap
     
     def sync_active_field(self, env):

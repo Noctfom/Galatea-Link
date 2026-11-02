@@ -8,6 +8,7 @@ from pathlib import Path
 from aiohttp.test_utils import TestClient, TestServer
 
 from app_config import ServiceConfig
+from link_version import __version__ as LINK_VERSION
 from core.link_events import LinkEventBus
 from service.http_api import create_http_app, validate_service_security
 from service.deck_repository import LinkDeckRepository
@@ -228,7 +229,7 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
         health = await self.client.get("/api/v1/health")
         self.assertEqual(health.status, 200)
         self.assertEqual(self.created, [])
-        self.assertEqual((await health.json())["data"]["version"], "3.2.0")
+        self.assertEqual((await health.json())["data"]["version"], LINK_VERSION)
 
         unauthorized = await self.client.get("/api/v1/status")
         self.assertEqual(unauthorized.status, 401)
@@ -383,7 +384,7 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 200)
         payload = (await response.json())["data"]
-        self.assertEqual(payload["supported_model_protocols"], [3])
+        self.assertEqual(payload["supported_model_protocols"], [3, 4])
         self.assertIn("selection", payload)
         self.assertEqual(self.created, [])
 

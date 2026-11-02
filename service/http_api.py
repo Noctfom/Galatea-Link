@@ -198,6 +198,8 @@ async def handle_capabilities(request: web.Request) -> web.Response:
             "external_api_versions": [API_VERSION],
             "link_version": __version__,
             "stable_model_protocols": [3],
+            "preview_model_protocols": [4],
+            "model_protocol_readiness": {"4": {"asset_import": True, "offline_inference": True, "online_inference": False, "reason": "awaiting_link_v4_observation_validation"}},
             "game_protocol_profile": "ygopro",
             "game_protocol_family": "ygopro",
             "known_compatible_clients": ["mdpro3"],
@@ -206,7 +208,7 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "catalog": True,
                 "selection": True,
                 "gkg_import": True,
-                "gkg_package_format_versions": [2],
+                "gkg_package_format_versions": [2, 4],
             },
             "asset_management": {
                 "card_database_sync": True,

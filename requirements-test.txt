@@ -1,0 +1,6 @@
+# -*- coding: utf-8 -*-
+# Link 完整回归测试依赖，开发验证时同时安装两类推理运行时
+-r requirements-pytorch.txt
+-r requirements-onnx.txt
+pytest>=8.2
+pytest-asyncio>=0.23

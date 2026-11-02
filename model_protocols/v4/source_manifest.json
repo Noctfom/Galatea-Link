@@ -1,0 +1,35 @@
+{
+  "source": "Galatea-Core",
+  "commit": "1b0fa025994b6eabb8c58dc1ed2090bfbea28d04",
+  "model_protocol_version": 4,
+  "schema_revision": 14,
+  "maintenance_sources": [
+    {
+      "commit": "f83f700e1624dda70531d6bdb51b5fd40e3d4916",
+      "purpose": "语义兼容证据只读校验及运行时坐标系元数据，未改变模型输入结构",
+      "source_sha256_bytes": {
+        "semantic_lookup.py": "99af21f4c80994ec4b7b2633ccdcfade1121bdc510091889cdd3fee8fba87551"
+      }
+    }
+  ],
+  "files_sha256": {
+    "auxiliary_heads.py": "a96063e51982b4d9ee879eb8cf346912089a03c9f45abfed3672e1866db5a322",
+    "core_message_protocol.py": "9c01d485e7b6febcb3844d7bbde4b67a0ae2e5aae3398309354c5f50ad81c1a5",
+    "data_types.py": "d8e1b2d9999735aeef5c79c482f6b53d6e7f2b8bb35af9e8764e408e39075cce",
+    "deck_encoder.py": "6cbcabff5d8f6a3869599fd66073f78c5230d5b7b6b35f3549af2cd4d98e72c9",
+    "deck_protocol.py": "040e511337dff3e868809fb79645e78b018a40c5bc9cd8e83145161f16537f69",
+    "event_encoder.py": "48a5953c83715b150c4627bccd30426ec2a2c9f7d7c91c1f50acc79fae26370b",
+    "event_history.py": "2f017eecb3c257bcc57d65a3a5508c3efbaf8201cc0dd04652a494a41f4ac13e",
+    "galatea_net.py": "d9fc3cfa4ac1b16e64da9702e6ea5f888ae8295d87e13bd6db0282b4ca4d3cb0",
+    "game_constants.py": "092388f300abe2a03641a9546c511433e6e62d216a7b59b3f37118eb8ea8c3be",
+    "goal_planner.py": "aa539b8a7e60d8bac95b661fc23b39bc4f1eaa84079ec7d0d82916bb6c5c418c",
+    "protocol_schema.py": "c5c2a939f2c00fe0b0465d6b398f170e4fe8b74f04aa0b03c24502f9ce7c08b6",
+    "public_context_encoder.py": "92b7efb25efe3d8896c9eda800b66d61b66e934313e3eeb5c083614a3c029469",
+    "public_observation.py": "620c2f5d1f30a0453fb452ffa45269afeded3fdbe68bccde158b47a24a29bcf9",
+    "auxiliary_targets.py": "b62454b31b38759f7d169a14469a226b2972c9c1b5138394e0fcabf7d7cb8580",
+    "card_vocab.py": "5d176913fc07ed4ce571be73077a1260e181b0b34f25098574d6e658ba946861",
+    "semantic_lookup.py": "9ea374cbd57b0d94e10410a3c93ad8e60cc171428c682f9e0660aa1ebf5e5286",
+    "public_hint_semantics.py": "ebb2026792e75defdd36383ca9f5479e1102d065f852cde0c5916ca38a51dfbb",
+    "feature_encoder.py": "ee91bd1c9e90878e4aaaa5024d19076dc8f1afc26a8f03d6471e11f4714cab7d"
+  }
+}

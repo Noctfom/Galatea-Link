@@ -40,6 +40,9 @@ MESSAGE_NAMES = {
     97: "cancel_target",
     110: "attack",
     111: "battle",
+    120: "missed_effect",
+    160: "card_hint",
+    165: "player_hint",
     140: "announce_race",
     141: "announce_attribute",
     142: "announce_card",
@@ -95,8 +98,13 @@ class LlmObservationBuilder:
     def build(self, snapshot, player_id: int, event_type: int | None = None) -> dict[str, Any]:
         if player_id not in (0, 1):
             raise ValueError("玩家编号必须是 0 或 1")
+        coverage = getattr(snapshot, "online_coverage", {})
+        if coverage.get("started") and coverage.get("perspective") != player_id:
+            raise ValueError("在线观察只能使用实际接收消息的玩家视角")
 
         catalog: dict[int, dict[str, Any]] = {}
+        public_flags = getattr(snapshot, "public_state_flags", ())
+        grave_blocked = len(public_flags) >= 5 and bool(public_flags[3 + player_id])
         index_to_entity_id = {
             index: self._entity_id(entity, player_id)
             for index, entity in enumerate(snapshot.entities)
@@ -112,6 +120,7 @@ class LlmObservationBuilder:
                 player_id,
                 index_to_entity_id,
                 catalog,
+                restrict_identity=grave_blocked and entity.location == Zone.GRAVE,
             )
             cards.append(card)
             if card.get("code"):
@@ -145,16 +154,18 @@ class LlmObservationBuilder:
 
         own_deck = snapshot.p0_deck_codes if player_id == 0 else snapshot.p1_deck_codes
         own_extra = snapshot.p0_extra_codes if player_id == 0 else snapshot.p1_extra_codes
+        public_context = self._build_public_context(snapshot, player_id, catalog)
 
         return {
             "schema_version": SCHEMA_VERSION,
             "information_quality": {
+                "online_coverage": dict(getattr(snapshot, "online_coverage", {})),
                 "scope": "modeled_player_visible_state",
                 "complete_protocol_projection": False,
                 "limitations": [
                     "仅包含 DuelState 当前已经建模的协议字段",
                     "部分系统级 description_id 尚无本地化选项文本",
-                    "持续效果、无效状态、回合限制和玩家提示尚未完整建模",
+                    "提示事实不等于完整的效果适用、持续期限和规则限制",
                     "近期历史只记录部分公开发动而不是完整效果结算过程",
                 ],
             },
@@ -171,6 +182,8 @@ class LlmObservationBuilder:
                 "phase_id": snapshot.global_data.phase_id,
                 "phase_name": Phases.get_str(snapshot.global_data.phase_id),
                 "actor": actor,
+                "turn_player": self._relative_player(snapshot.global_data.turn_player, player_id) if getattr(snapshot.global_data, "turn_player", None) in (0, 1) else None,
+                "starting_player": self._relative_player(snapshot.global_data.starting_player, player_id) if getattr(snapshot.global_data, "starting_player", None) in (0, 1) else None,
             },
             "players": {
                 "self": self._build_player_resources(snapshot.global_data, player_id),
@@ -184,10 +197,76 @@ class LlmObservationBuilder:
             },
             "chain": chain,
             "recent_history": history,
+            "public_context": public_context,
             "decision_required": actor == "self" and bool(legal_actions),
             "legal_actions": legal_actions,
             "card_catalog": [catalog[code] for code in sorted(catalog)],
         }
+
+    # 输出有界的服务器提示与合法记牌，不根据提示推断隐藏身份或效果有效性
+    def _build_public_context(self, snapshot, player_id, catalog):
+        flags = getattr(snapshot, "public_state_flags", ())
+        entities = {(card.owner, card.location, card.sequence): card for card in snapshot.entities}
+        kinds = {1: "turn", 2: "card", 3: "race", 4: "attribute", 5: "number", 6: "description", 8: "player_description"}
+        hints = []
+        for hint in getattr(snapshot, "public_hints", ()):
+            if not hint.visibility & (1 << player_id):
+                continue
+            record = {"player": self._relative_player(hint.player, player_id),
+                "kind": kinds.get(hint.kind, "unknown"), "value": hint.value,
+                "count": hint.count, "observed_turn": hint.turn}
+            host_code = 0
+            if hint.location >= 0:
+                from game_constants import LocationInfo
+                owner, zone, sequence, overlay = LocationInfo.decode(hint.location)
+                host = entities.get((owner, zone & ~Zone.OVERLAY, sequence))
+                blocked = zone == Zone.GRAVE and len(flags) >= 5 and flags[3 + player_id]
+                if blocked or owner != player_id and (host is None or not self._is_identity_visible(host, player_id)):
+                    continue
+                record.update(location_id=zone, location_name=Zone.get_str(zone), sequence=sequence)
+                if host is not None:
+                    host_code = self._pure_code(host.code)
+                    if zone & Zone.OVERLAY:
+                        codes = getattr(host, "overlay_codes", ())
+                        host_code = self._pure_code(codes[overlay]) if overlay < len(codes) else 0
+                        record["overlay_sequence"] = overlay
+                    else:
+                        record["host_entity_id"] = self._entity_id(host, player_id)
+            if hint.kind in (6, 8):
+                record["description_id"] = hint.value
+                description = getattr(self.card_reader, "get_effect_description", None)
+                if description is not None and (host_code or hint.kind == 8):
+                    text = description(hint.value, host_code)
+                    if text:
+                        record["description"] = text
+            elif hint.kind == 2 and hint.value:
+                card = self._register_card(self._pure_code(hint.value), catalog)
+                record["related_card"] = {"code": card["code"], "name": card["name"]}
+            hints.append(record)
+        known_cards = []
+        for card in getattr(snapshot, "known_deck_cards", ()):
+            if card.visibility & (1 << player_id):
+                identity = self._register_card(card.code, catalog)
+                known_cards.append({"player": self._relative_player(card.player, player_id),
+                    "sequence_from_bottom": card.sequence, "code": card.code,
+                    "name": identity["name"], "faceup": card.faceup})
+        notifications = []
+        for event in getattr(snapshot, "public_notifications", ()):
+            if not event.get("visibility", 3) & (1 << player_id):
+                continue
+            item = {key: event[key] for key in ("type", "turn", "sequence")}
+            item["name"] = MESSAGE_NAMES.get(event["type"], "public_notification")
+            if event.get("code"):
+                identity = self._register_card(event["code"], catalog)
+                item.update(code=identity["code"], card_name=identity["name"])
+            notifications.append(item)
+        return {"schema_version": "galatea.llm_public_context.v1", "source": "link_online_messages",
+            "hints": hints[:128], "hints_truncated": len(hints) > 128,
+            "known_deck_positions": known_cards[:512], "recent_notifications": notifications[-16:],
+            "deck_reversed": bool(flags[2]) if len(flags) >= 3 and flags[1] else None,
+            "tracked_hint_lifecycle_consistent": bool(flags[0]) if flags else None,
+            "grave_access_restricted": bool(flags[3 + player_id]) if len(flags) >= 5 else False,
+            "hint_interpretation": "仅为服务器提示事实，不代表对应效果一定生效或仍在适用"}
 
     # 将观察转换为稳定可读的 JSON 文本
     def to_json(self, observation: dict[str, Any], indent: int | None = None) -> str:
@@ -223,8 +302,9 @@ class LlmObservationBuilder:
         player_id: int,
         index_to_entity_id: dict[int, str],
         catalog: dict[int, dict[str, Any]],
+        restrict_identity: bool = False,
     ) -> dict[str, Any]:
-        visible = self._is_identity_visible(entity, player_id)
+        visible = not restrict_identity and self._is_identity_visible(entity, player_id)
         result = {
             "entity_id": entity_id,
             "controller": self._relative_player(entity.owner, player_id),
@@ -279,6 +359,26 @@ class LlmObservationBuilder:
                 "attribute": entity.attribute,
             }
         )
+        result.update({"base_atk": entity.base_atk, "base_def": entity.base_def,
+                       "lscale": entity.lscale, "rscale": entity.rscale, "link_marker": entity.link_marker})
+        known_fields = getattr(entity, "query_known_fields", None)
+        if known_fields is not None:
+            result["dynamic_state_source"] = "server_query"
+            result["query_sequence"] = getattr(entity, "query_sequence", None)
+            result["known_dynamic_fields"] = list(known_fields)
+            for output_name, query_name in {
+                "current_atk": "current_atk", "current_def": "current_def", "base_atk": "base_atk", "base_def": "base_def",
+                "level": "current_level", "type_mask": "current_type", "race": "current_race", "attribute": "current_attr",
+                "lscale": "lscale", "rscale": "rscale", "link_marker": "link_marker", "counter_count": "counter_count",
+                "overlay_count": "overlay_codes", "is_equipped": "equip_target",
+            }.items():
+                if query_name not in known_fields:
+                    result.pop(output_name, None)
+            for output_name, query_name in {"rank": "current_rank", "link_rating": "link_rating", "current_code": "current_code",
+                    "is_disabled": "is_disabled", "is_forbidden": "is_forbidden", "properly_summoned": "properly_summoned",
+                    "original_owner": "original_owner", "counter_items": "counter_items"}.items():
+                if query_name in known_fields:
+                    result[output_name] = getattr(entity, query_name)
         if code:
             card = self._register_card(code, catalog)
             result["name"] = card["name"]

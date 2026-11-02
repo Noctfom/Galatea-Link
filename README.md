@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.2.0-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.3.1-6b8f71)
 
 </div>
 
@@ -14,17 +14,19 @@ Galatea Link 是一个独立的游戏王智能体运行与接入层。它通过 
 
 Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://github.com/Noctfom/Galatea-Link-mobile)！也可以[点击这里](galatea.noctfom.top)直接前往软件下载页！
 
-> 当前处于开发阶段，优先支持模型协议 V3 和 YGOPro 兼容服务器。请先在测试房间验证卡组、协议版本和决策时限，再用于正式对局
+> 在线模型仍以 V3 为稳定接入路径。V4 资产与离线推理已接通，在线决策等待 Link 自身的历史、状态和编码对照完成，详见 [V4 接入说明](docs/V4_ADAPTER.md)。请先在测试房间验证卡组、协议版本和决策时限
 
 ## 已实现能力
 
 - 连接本地或在线 YGOPro 兼容服务器，支持服务端协议版本拒绝后的有限自动重试
 - 加入房间、上传卡组、准备、猜拳、先后攻选择，以及房主在双方准备后的自动开局
 - 加载模型协议 V3 的 PyTorch 或 ONNX 模型，支持 GKG 格式 2 导入和模型资产校验
+- 导入 V4 GKG 格式 4、精确词表和编译语义，支持独立 PTH／ONNX 离线推理，暂未开放 V4 在线决策
 - `core_only`、`hybrid`、`llm_review`、`llm_only` 四种决策模式
 - Link 内置 OpenAI Compatible LLM，支持结构化动作、静态前缀缓存、请求诊断和安全回退
 - AstrBot 作为主智能体远程决策、游戏内聊天、查卡、卡组导入及会话隔离的临时卡组编辑
 - 玩家可见观察、远程合法动作提交、运行时控制、WebSocket 事件流和低开销赛后摘要
+- Link 独立处理服务器卡片与玩家提示、错过发动时点和公开卡组位置，供本地及远程 LLM 使用
 - 浅色/深色 WebUI，可配置连接、模型、LLM、决策策略、运行资产和游戏聊天
 - Link 本地卡组仓库，可导入、查看、选择、单卡调整和安全删除 YDK
 - 卡库、Lua 脚本、语义资产同步，以及 MSG 142 宣言兜底池管理
@@ -135,7 +137,8 @@ WebUI 保存的 `link_state.json` 会覆盖 `config.yaml` 中对应的服务器�
 运行全部自动测试：
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -m pip install -r requirements-test.txt
+python -m pytest tests -q
 ```
 
 验证 LLM API、结构化输出和缓存命中：
@@ -170,13 +173,15 @@ python scripts/audit_release_privacy.py
 - [AstrBot 远程桥接](docs/ASTRBOT_BRIDGE.md)：插件安装、Pages、工具和会话隔离
 - [DeepSeek Harness 对接](docs/DSH_BRIDGE.md)：dsh 原生工具、后台决策和安装检查
 - [模型协议适配](docs/MODEL_PROTOCOL_ADAPTERS.md)：V3、PTH/ONNX、GKG 和后续版本扩展
+- [V4 接入说明](docs/V4_ADAPTER.md)：资产、离线推理、在线进度及验证方式
+- [V4 对接职责与模型合同](docs/CORE_V4_ONLINE_CONTRACT.md)：Core 模型合同、受控接入和真实服务器解析的职责边界
 - [安全与隐私](docs/SECURITY.md)：密钥、卡组、日志与 Git 上传检查
 - [更新记录](CHANGELOG.md)：从 Link 3.0.0 开始的软件版本记录
 - [Core 3.4.2 历史适配](docs/CORE_342_ADAPTER.md)：冻结的旧协议说明，不是当前推荐部署
 
 ## 当前限制
 
-- 当前主线模型协议为 V3；新模型协议会新增隔离适配器，不会靠近似形状强行加载
+- 当前在线稳定模型协议为 V3；V4 已接通资产和离线推理，在线观测不完整时拒绝启动模型决策
 - 在线 BO3 局间换备尚未接入稳定上层状态机，当前只支持赛前编辑临时卡组的副卡组区域
 - LLM/AstrBot 可能超过游戏动作时限，Link 会取消过期请求并使用 Core 或 RuleBot 安全回退
 - 游戏协议只提供玩家可见数据；Link 不会把不可见卡片或其他会话的卡组信息交给外部智能体

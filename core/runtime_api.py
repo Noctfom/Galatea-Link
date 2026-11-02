@@ -101,6 +101,8 @@ class GalateaRuntimeApi:
                 "left": copy.deepcopy(getattr(self._link, "time_left", {})),
             },
             "core_model": {
+                "loaded": bool(getattr(self._link, "core_model_loaded", False)),
+                "online_block_reason": (model_metadata or {}).get("online_block_reason"),
                 "available": bool(getattr(ai, "model_available", False)),
                 "runtime_available": bool(
                     getattr(ai, "model_available", False)

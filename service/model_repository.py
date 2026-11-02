@@ -1,4 +1,4 @@
-# Link 模型仓库模块，发现模型并安全导入模型协议 V3 的 GKG 部署包
+# Link 模型仓库模块，发现模型并安全导入按协议隔离的 V3 和 V4 部署包
 
 from __future__ import annotations
 
@@ -48,6 +48,11 @@ ASSET_FILENAMES = {
     "code_embeddings_idx.json",
     "meta_staples.json",
     "cards.cdb",
+    "card_vocab.json",
+    "semantic_lookup_v1.npz",
+    "semantic_lookup_v1.json",
+    "code_embeddings_meta.json",
+    "semantic_compatibility_v1.json",
 }
 
 
@@ -106,12 +111,12 @@ def read_artifact_manifest(path: Path) -> dict[str, Any]:
         payload = json.load(stream)
     if not isinstance(payload, dict):
         raise ValueError("模型制品清单必须是 JSON 对象")
-    if payload.get("artifact_manifest_version") != 2:
+    protocol = payload.get("model_protocol_version")
+    if protocol == 4:
+        from model_protocols.v4.backend import inspect_v4_metadata
+        inspect_v4_metadata(payload)
+    if (payload.get("artifact_manifest_version"), payload.get("checkpoint_format_version"), protocol) not in {(2, 2, 3), (3, 3, 4)}:
         raise ValueError("模型制品清单版本不受支持")
-    if payload.get("checkpoint_format_version") != 2:
-        raise ValueError("检查点格式必须为 2")
-    if payload.get("model_protocol_version") != MODEL_PROTOCOL_VERSION:
-        raise ValueError("当前仓库只接收模型协议 V3")
     model_id = payload.get("model_id")
     if not isinstance(model_id, str) or str(uuid.UUID(model_id)) != model_id:
         raise ValueError("模型 UUID 无效")
@@ -255,7 +260,7 @@ class LinkModelRepository:
         )
         return {
             "schema_version": "galatea.link.model_catalog.v1",
-            "supported_model_protocols": [MODEL_PROTOCOL_VERSION],
+            "supported_model_protocols": [3, 4],
             "models": models,
             "invalid": invalid,
         }
@@ -317,6 +322,19 @@ class LinkModelRepository:
             with zipfile.ZipFile(source, "r") as archive:
                 self._safe_extract(archive, stage_root)
             validated = self._validate_stage(stage_root)
+            if validated["protocol"] == 4 and not (validated["model_id"] or target_model_id):
+                raise ValueError("V4 纯资产包必须明确绑定目标模型 UUID")
+            if validated["protocol"] == 4:
+                from model_protocols.v4.assets import load_v4_assets
+                staged_assets = load_v4_assets(stage_root)
+                target = self.project_root / "model_assets" / "v4" / (validated["model_id"] or target_model_id)
+                if (target / "card_vocab.json").is_file():
+                    self._merge_v4_compatibility(stage_root, target, validated)
+                    staged_assets.validate(load_v4_assets(target).identity, "已安装 V4 资产前缀", allow_semantic_updates=True)
+                for inspected in self.discover()["models"]:
+                    if inspected.get("format") == "onnx" and inspected.get("model_protocol_version") == 4 and inspected.get("model_id") == (validated["model_id"] or target_model_id):
+                        # 冻结图内语义不能随同池 PTH 一起热更新
+                        staged_assets.validate(inspected, "同模型池已安装 ONNX，请保留其原语义资产或重新导出")
             installed_files = self._install_models(
                 stage_root,
                 validated["manifest"]["model_files_included"],
@@ -325,11 +343,12 @@ class LinkModelRepository:
                 stage_root,
                 validated["model_id"] or target_model_id,
                 validated["asset_files"],
+                protocol=validated["protocol"],
             )
         return {
             "package_name": package_name,
-            "package_format_version": GKG_FORMAT_VERSION,
-            "model_protocol_version": MODEL_PROTOCOL_VERSION,
+            "package_format_version": validated["manifest"]["package_format_version"],
+            "model_protocol_version": validated["protocol"],
             "model_id": validated["model_id"],
             "asset_target_model_id": validated["model_id"] or target_model_id,
             "models": validated["records"],
@@ -337,6 +356,27 @@ class LinkModelRepository:
             "installed_asset_files": list(validated["asset_files"]),
             "assets_path": assets_path,
         }
+
+    # 在暂存区合并兼容历史并保留已验证的旧资产来源，不修改输入部署包
+    def _merge_v4_compatibility(self, stage_root, target, validated):
+        from model_protocols.v4.assets import load_v4_assets
+        from model_protocols.v4.semantic_compatibility import (
+            SEMANTIC_COMPATIBILITY_FILENAME, read_semantic_compatibility_registry,
+            merge_semantic_compatibility_registries, semantic_compatibility_descriptor,
+        )
+        registry = merge_semantic_compatibility_registries(
+            read_semantic_compatibility_registry(target), read_semantic_compatibility_registry(stage_root))
+        for directory in (target, stage_root):
+            assets = load_v4_assets(directory)
+            descriptor = semantic_compatibility_descriptor(assets.lookup)
+            bases = {descriptor["semantic_lookup_hash"]: descriptor} if descriptor else {}
+            registry = merge_semantic_compatibility_registries(registry, {"format_version": 1, "bases": bases,
+                "category_to_index": assets.lookup.category_to_index,
+                "requirement_to_index": assets.lookup.requirement_to_index})
+        if registry and registry["bases"]:
+            (stage_root / SEMANTIC_COMPATIBILITY_FILENAME).write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+            validated["asset_files"] = sorted(set(validated["asset_files"]) | {SEMANTIC_COMPATIBILITY_FILENAME})
 
     # 从制品清单或模型本体读取单个模型身份
     def _describe_model(self, path: Path) -> dict[str, Any]:
@@ -372,10 +412,17 @@ class LinkModelRepository:
             inspected = inspect_model_checkpoint(path)
             files = [path.name]
 
-        if int(inspected["model_protocol_version"]) != MODEL_PROTOCOL_VERSION:
+        protocol = int(inspected["model_protocol_version"])
+        if protocol not in {3, 4}:
             raise ValueError("模型协议版本当前未启用")
-        assets_path = self._assets_for_model(str(inspected["model_id"]))
-        return {
+        if protocol == 4 and path.suffix.casefold() == ".pth":
+            actual = inspect_model_checkpoint(path)
+            for key in ("model_id", "model_prefix", "iteration", "model_protocol_version"):
+                if actual.get(key) != inspected.get(key):
+                    raise ValueError(f"V4 PTH 本体与制品清单不一致: {key}")
+            inspected = actual
+        assets_path = self._assets_for_model(str(inspected["model_id"]), protocol=protocol)
+        result = {
             "primary": path.name,
             "format": "onnx" if path.suffix.casefold() == ".onnx" else "pytorch_checkpoint",
             "model_id": inspected["model_id"],
@@ -393,12 +440,22 @@ class LinkModelRepository:
             "assets_path": assets_path,
             "assets_available": bool(assets_path),
         }
+        if protocol == 4:
+            from model_protocols.v4.assets import PROTOCOL_IDENTITY_KEYS
+            result.update({key: inspected.get(key) for key in PROTOCOL_IDENTITY_KEYS})
+            result.update({"online_inference_ready": False, "online_block_reason": "Link V4 在线历史与状态编码待验收", "training_stage": inspected.get("training_stage")})
+        return result
 
     # 返回模型专属资产或兼容旧布局的公共 V3 资产
-    def _assets_for_model(self, model_id: str) -> str | None:
-        candidates = [self.asset_root / model_id, self.asset_root]
+    def _assets_for_model(self, model_id: str, protocol: int = 3) -> str | None:
+        if protocol == 4:
+            from model_protocols.v4 import REQUIRED_ASSET_FILENAMES as required
+            candidates = [self.project_root / "model_assets" / "v4" / model_id]
+        else:
+            required = REQUIRED_ASSET_FILENAMES
+            candidates = [self.asset_root / model_id, self.asset_root]
         for candidate in candidates:
-            if all((candidate / name).is_file() for name in REQUIRED_ASSET_FILENAMES):
+            if all((candidate / name).is_file() for name in required):
                 return f"./{candidate.relative_to(self.project_root).as_posix()}"
         return None
 
@@ -465,8 +522,18 @@ class LinkModelRepository:
             manifest = json.load(stream)
         if not isinstance(manifest, Mapping):
             raise ValueError("GKG 清单必须是 JSON 对象")
-        if manifest.get("package_format_version") != GKG_FORMAT_VERSION:
+        package_version = manifest.get("package_format_version")
+        if type(package_version) is not int:
+            raise ValueError("GKG 格式版本必须是整数")
+        package_protocol = 3 if package_version == 2 else 4 if package_version == 4 else None
+        if package_protocol is None:
             raise ValueError("GKG 部署包格式版本不受支持")
+        v4_assets = None
+        if package_protocol == 4:
+            from model_protocols.v4.assets import inspect_protocol_identity, load_v4_assets
+            inspect_protocol_identity(manifest)
+            v4_assets = load_v4_assets(stage_root)
+            v4_assets.validate(manifest, "GKG V4 清单")
         validate_package_name(manifest.get("package_name"))
         models_included = manifest.get("models_included")
         model_files = manifest.get("model_files_included")
@@ -517,8 +584,10 @@ class LinkModelRepository:
                 raise ValueError("GKG 模型 UUID 无效")
             prefix = validate_model_prefix(record.get("model_prefix"))
             protocol = record.get("model_protocol_version")
-            if protocol != MODEL_PROTOCOL_VERSION:
+            if protocol != package_protocol:
                 raise ValueError("GKG 模型协议版本当前未启用")
+            if v4_assets is not None:
+                v4_assets.validate(dict(record), "GKG V4 模型记录", allow_semantic_updates=record.get("format") == "pytorch_checkpoint")
             iteration = record.get("iteration")
             if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
                 raise ValueError("GKG 模型轮次无效")
@@ -543,6 +612,11 @@ class LinkModelRepository:
                 raise ValueError("GKG 模型格式与主文件扩展名不一致")
 
             described = self._describe_staged_model(stage_root / primary)
+            if v4_assets is not None:
+                v4_assets.validate(described, "GKG V4 模型本体", allow_semantic_updates=model_format == "pytorch_checkpoint")
+                from model_protocols.v4.assets import PROTOCOL_IDENTITY_KEYS
+                if any(described.get(key) != record.get(key) for key in PROTOCOL_IDENTITY_KEYS):
+                    raise ValueError("GKG V4 模型记录与本体协议身份不一致")
             for key, expected in (
                 ("model_id", model_id),
                 ("model_prefix", prefix),
@@ -568,6 +642,10 @@ class LinkModelRepository:
                 raise ValueError("GKG PTH 模型记录只能声明主检查点")
             if marker_path.is_file():
                 artifact_manifest = read_artifact_manifest(marker_path)
+                if v4_assets is not None:
+                    v4_assets.validate(artifact_manifest, "GKG V4 制品清单", allow_semantic_updates=model_format == "pytorch_checkpoint")
+                    if any(artifact_manifest.get(key) != described.get(key) for key in PROTOCOL_IDENTITY_KEYS):
+                        raise ValueError("GKG V4 制品清单与模型本体协议身份不一致")
                 for key, expected in (
                     ("model_id", model_id),
                     ("model_prefix", prefix),
@@ -608,8 +686,18 @@ class LinkModelRepository:
         present_semantics = semantic_set.intersection(asset_files)
         if present_semantics and present_semantics != semantic_set:
             raise ValueError("GKG 语义资产不完整")
-        if present_semantics:
+        if present_semantics and package_protocol == 3:
             validate_semantic_bundle(stage_root)
+        if package_protocol == 3 and {"card_vocab.json", "semantic_lookup_v1.json", "semantic_lookup_v1.npz", "semantic_compatibility_v1.json"}.intersection(asset_files):
+            raise ValueError("V3 部署包不能混入 V4 运行资产")
+        if package_protocol == 4:
+            if manifest.get("includes_card_vocab") is not True or manifest.get("includes_static_semantics") is not True:
+                raise ValueError("V4 部署包必须声明精确词表和编译语义资产")
+            if "code_embeddings_meta.json" in asset_files and not present_semantics:
+                raise ValueError("V4 代码来源清单需要完整源语义资产")
+            if present_semantics:
+                from model_protocols.v4.semantic_lookup import load_static_semantic_assets
+                load_static_semantic_assets(stage_root, card_vocabulary=v4_assets.vocabulary, verify_source_files=True, verify_logical_hash=True)
         if "cards.cdb" in asset_files:
             validate_card_database(stage_root / "cards.cdb")
         if manifest.get("includes_kb") is not ("knowledge_base.json" in asset_files):
@@ -631,6 +719,7 @@ class LinkModelRepository:
             "records": normalized_records,
             "model_id": next(iter(model_ids), None),
             "asset_files": asset_files,
+            "protocol": package_protocol,
         }
 
     # 读取暂存模型并核对内部身份
@@ -644,6 +733,10 @@ class LinkModelRepository:
         installed = []
         self.model_root.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
+            target = self.model_root / filename
+            if target.exists() and (target.is_symlink() or not target.is_file() or sha256_file(target) != sha256_file(stage_root / filename)):
+                raise PermissionError(f"拒绝覆盖内容不同的同名文件: {filename}")
+        for filename in filenames:
             source = stage_root / filename
             target = self.model_root / filename
             if install_file_without_identity_collision(source, target):
@@ -656,16 +749,28 @@ class LinkModelRepository:
         stage_root: Path,
         model_id: str | None,
         filenames: list[str],
+        protocol: int = 3,
     ) -> str | None:
         if not filenames:
             return None
-        target_root = self.asset_root / model_id if model_id else self.asset_root
+        asset_root = self.project_root / "model_assets" / f"v{protocol}"
+        target_root = asset_root / model_id if model_id else asset_root
+        if protocol == 4 and target_root.exists():
+            from model_protocols.v4 import REQUIRED_ASSET_FILENAMES as required
+            from model_protocols.v4.assets import load_v4_assets
+            if all((target_root / name).is_file() for name in required):
+                old_assets = load_v4_assets(target_root)
+                load_v4_assets(stage_root).validate(old_assets.identity, "已安装 V4 资产前缀", allow_semantic_updates=True)
         target_root.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
             replace_runtime_asset(
                 stage_root / filename,
                 target_root / filename,
             )
+        if protocol == 4:
+            from model_protocols.v4.assets import load_v4_assets
+            load_v4_assets(target_root)
+            return f"./{target_root.relative_to(self.project_root).as_posix()}"
         if set(REQUIRED_ASSET_FILENAMES).issubset(filenames):
             validate_semantic_bundle(target_root)
         if all((target_root / name).is_file() for name in REQUIRED_ASSET_FILENAMES):

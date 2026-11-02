@@ -215,7 +215,7 @@ class AstrBotRemoteBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("available_decks", configuration)
 
         catalog = await self.bridge.get_models()
-        self.assertEqual(catalog["supported_model_protocols"], [3])
+        self.assertEqual(catalog["supported_model_protocols"], [3, 4])
         self.assertIn("selection", catalog)
         decks = await self.bridge.get_decks("group_100")
         self.assertEqual(decks["scope"], "current_astrbot_session")

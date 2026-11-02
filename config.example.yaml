@@ -29,6 +29,7 @@ model:
   device: "cpu"
   weights_path: "./models/galatea_model.onnx"
   expected_model_id: ""
+  # V3 在线稳定，V4 当前仅开放资产导入和完整快照离线推理
   protocol: "auto"
   inference_backend: "auto"
   onnx_providers: ["CPUExecutionProvider"]

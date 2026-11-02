@@ -93,7 +93,7 @@ class DuelProtocolRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_message_updates_core_player_mapping(self):
         link = self._make_link()
 
-        await link.handle_server_msg(0x01, bytes([4, 1, 5, 0, 0]))
+        await link.handle_server_msg(0x01, bytes([4]) + struct.pack("<BBIIHHHH", 1, 5, 8000, 8000, 40, 15, 2, 1))
 
         self.assertEqual(link.ai_core_player_id, 1)
         self.assertEqual(link.ai.player_id, 1)

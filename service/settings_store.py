@@ -232,8 +232,8 @@ class LinkServiceSettingsStore:
                 f"当前为 {self._model_revision} 请求为 {expected_revision}"
             )
         protocol_version = int(record["model_protocol_version"])
-        if protocol_version != 3:
-            raise ValueError("当前模型选择界面仅启用模型协议 V3")
+        if protocol_version not in {3, 4}:
+            raise ValueError("当前模型选择界面仅启用模型协议 V3 和 V4")
         model_format = str(record["format"])
         backend = "onnxruntime" if model_format == "onnx" else "pytorch"
         self._model = replace(
