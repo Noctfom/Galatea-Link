@@ -654,6 +654,8 @@ class GalateaRuntimeApi:
             "agent_backend",
             "core_policy_mode",
             "core_temperature",
+            "core_loop_retry_enabled",
+            "core_loop_repeat_threshold",
             "core_confidence_threshold",
             "force_llm_message_types",
             "include_core_suggestion",
@@ -672,6 +674,15 @@ class GalateaRuntimeApi:
             raise ValueError("宏观控制补丁包含未知字段")
 
         replacements = {}
+        if "core_loop_retry_enabled" in intervention:
+            if type(intervention["core_loop_retry_enabled"]) is not bool:
+                raise ValueError("core_loop_retry_enabled 必须为布尔值")
+            replacements["core_loop_retry_enabled"] = intervention["core_loop_retry_enabled"]
+        if "core_loop_repeat_threshold" in intervention:
+            value = intervention["core_loop_repeat_threshold"]
+            if type(value) is not int or not 1 <= value <= 100:
+                raise ValueError("闭环回退阈值必须为 1 到 100 的整数")
+            replacements["core_loop_repeat_threshold"] = value
         if "agent_backend" in intervention:
             replacements["agent_backend"] = str(intervention["agent_backend"]).strip().casefold()
         if "mode" in intervention:
@@ -811,6 +822,8 @@ class GalateaRuntimeApi:
             raise ValueError("Core 动作策略不受支持")
         if not 0.05 <= config.core_temperature <= 5.0:
             raise ValueError("Core 模型温度必须位于 0.05 到 5.0")
+        if type(config.core_loop_retry_enabled) is not bool or type(config.core_loop_repeat_threshold) is not int or not 1 <= config.core_loop_repeat_threshold <= 100:
+            raise ValueError("Core 闭环回退配置无效")
         if not 0.0 <= config.core_confidence_threshold <= 1.0:
             raise ValueError("Core 置信度阈值必须位于 0 到 1")
         if config.core_time_budget <= 0:
@@ -889,6 +902,8 @@ class GalateaRuntimeApi:
             "agent_backend": config.agent_backend,
             "core_policy_mode": config.core_policy_mode,
             "core_temperature": config.core_temperature,
+            "core_loop_retry_enabled": config.core_loop_retry_enabled,
+            "core_loop_repeat_threshold": config.core_loop_repeat_threshold,
             "core_confidence_threshold": config.core_confidence_threshold,
             "force_llm_message_types": list(config.force_llm_message_types),
             "include_core_suggestion": config.include_core_suggestion,

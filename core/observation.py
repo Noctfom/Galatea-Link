@@ -30,12 +30,18 @@ MESSAGE_NAMES = {
     41: "new_phase",
     50: "move",
     70: "chain_start",
+    71: "chain_confirmed",
+    72: "chain_solving",
+    73: "chain_solved",
     74: "chain_end",
+    75: "chain_activation_negated",
+    76: "chain_effect_disabled",
     90: "draw",
     91: "damage",
     92: "recover",
     93: "equip",
     94: "lp_update",
+    95: "unequip",
     96: "card_target",
     97: "cancel_target",
     110: "attack",
@@ -151,6 +157,10 @@ class LlmObservationBuilder:
 
         chain = [self._build_public_event(item, player_id, catalog) for item in snapshot.chain_stack]
         history = [self._build_public_event(item, player_id, catalog) for item in snapshot.history_stack]
+        chain_progress = getattr(snapshot, "public_chain_progress", {})
+        if chain_progress.get("observed"):
+            chain = [self._build_public_event(item, player_id, catalog) for item in chain_progress["current"]]
+            history = [self._build_public_event(item, player_id, catalog) for item in chain_progress["recent"]]
 
         own_deck = snapshot.p0_deck_codes if player_id == 0 else snapshot.p1_deck_codes
         own_extra = snapshot.p0_extra_codes if player_id == 0 else snapshot.p1_extra_codes
@@ -159,6 +169,9 @@ class LlmObservationBuilder:
         return {
             "schema_version": SCHEMA_VERSION,
             "information_quality": {
+                "chain_notifications": {"observed": bool(chain_progress.get("observed")),
+                    "unmatched_notifications": chain_progress.get("unmatched_notifications", 0),
+                    "complete_effect_history": False},
                 "online_coverage": dict(getattr(snapshot, "online_coverage", {})),
                 "scope": "modeled_player_visible_state",
                 "complete_protocol_projection": False,
@@ -166,7 +179,7 @@ class LlmObservationBuilder:
                     "仅包含 DuelState 当前已经建模的协议字段",
                     "部分系统级 description_id 尚无本地化选项文本",
                     "提示事实不等于完整的效果适用、持续期限和规则限制",
-                    "近期历史只记录部分公开发动而不是完整效果结算过程",
+                    "连锁状态仅反映已收到的确认和结算通知，不代表完整效果处理过程或效果成功适用",
                 ],
             },
             "perspective": {
@@ -375,6 +388,9 @@ class LlmObservationBuilder:
                 "overlay_count": "overlay_codes", "is_equipped": "equip_target",
             }.items():
                 if query_name not in known_fields:
+                    if output_name == "is_equipped" and (entity.equip_target_entity_idx >= 0 or entity.equipped_by_entity_indices
+                            or "equip_target" in getattr(entity, "relation_known_fields", ())):
+                        continue
                     result.pop(output_name, None)
             for output_name, query_name in {"rank": "current_rank", "link_rating": "link_rating", "current_code": "current_code",
                     "is_disabled": "is_disabled", "is_forbidden": "is_forbidden", "properly_summoned": "properly_summoned",
@@ -384,6 +400,8 @@ class LlmObservationBuilder:
         if code:
             card = self._register_card(code, catalog)
             result["name"] = card["name"]
+        if getattr(entity, "relation_known_fields", ()):
+            result["relation_state_source"] = "server_event"
         if entity.overlay_codes and (known_fields is None or "overlay_codes" in known_fields):
             result["overlay_cards"] = self._build_overlay_cards(
                 entity.overlay_codes,
@@ -499,6 +517,11 @@ class LlmObservationBuilder:
             result["sequence"] = item["s"]
         if item.get("desc"):
             result["description_id"] = item["desc"]
+        if "stage" in item:
+            result.update({"chain_number": item["ct"], "stage": item["stage"],
+                "chain_ended": item["chain_ended"], "resolution_observed": item["resolution_observed"],
+                "activation_negated_observed": item["activation_negated_observed"],
+                "effect_disabled_observed": item["effect_disabled_observed"]})
         return result
 
     # 汇总已知卡片并保留重复数量

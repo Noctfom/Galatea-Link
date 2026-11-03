@@ -405,6 +405,9 @@ function renderModelMetadata(coreModel, configuredModel) {
   const metadata = coreModel?.metadata;
   const rows = [["状态", coreModel ? (coreModel.available ? "可用" : "不可用") : "等待加载"]];
   if (metadata && typeof metadata === "object") {
+    if (metadata.asset_compatibility?.warning) {
+      rows.push(["ONNX 资产警告", metadata.asset_compatibility.message]);
+    }
     const preferredKeys = ["backend", "protocol_version", "model_protocol_version", "checkpoint", "model_name", "adapter", "format"];
     const used = new Set();
     for (const key of preferredKeys) {
@@ -1303,6 +1306,8 @@ function renderControls(controls) {
   query("#agentBackendInput").value = intervention.agent_backend || "local";
   query("#corePolicyInput").value = intervention.core_policy_mode || "greedy";
   query("#coreTemperatureInput").value = intervention.core_temperature ?? 0.8;
+  query("#coreLoopRetryInput").checked = intervention.core_loop_retry_enabled ?? true;
+  query("#coreLoopThresholdInput").value = intervention.core_loop_repeat_threshold ?? 5;
   query("#thresholdInput").value = intervention.core_confidence_threshold ?? 0.65;
   setText("#thresholdOutput", intervention.core_confidence_threshold ?? 0.65);
   query("#forceTypesInput").value = (intervention.force_llm_message_types || []).join(", ");
@@ -1408,6 +1413,8 @@ async function saveStrategy(event) {
       agent_backend: query("#agentBackendInput").value,
       core_policy_mode: query("#corePolicyInput").value,
       core_temperature: Number(query("#coreTemperatureInput").value),
+      core_loop_retry_enabled: query("#coreLoopRetryInput").checked,
+      core_loop_repeat_threshold: Number(query("#coreLoopThresholdInput").value),
       core_confidence_threshold: Number(query("#thresholdInput").value),
       force_llm_message_types: parseIntegerList(query("#forceTypesInput").value),
       include_core_suggestion: query("#includeCoreInput").checked,
@@ -2088,7 +2095,8 @@ async function importGkg(event) {
     renderModelCatalog(result.catalog);
     input.value = "";
     updateGkgFileLabel();
-    notify(`GKG 导入成功，共安装 ${result.imported.installed_files.length} 个新文件`);
+    const warning = result.imported.warnings?.find((item) => item.warning);
+    notify(`GKG 导入成功，共安装 ${result.imported.installed_files.length} 个新文件${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
   } finally {
     setButtonBusy("#importGkgButton", false);
   }
@@ -2112,7 +2120,8 @@ async function importLocalPackage() {
       body: JSON.stringify({ filename, activate: true }),
     });
     renderModelCatalog(result.catalog);
-    notify(`本地 GKG 包 ${filename} 已导入`);
+    const warning = result.imported.warnings?.find((item) => item.warning);
+    notify(`本地 GKG 包 ${filename} 已导入${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
   } finally {
     setButtonBusy("#importLocalPackageButton", false);
     renderLocalPackages(appState.modelCatalog?.packages);

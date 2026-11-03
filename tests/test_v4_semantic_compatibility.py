@@ -98,15 +98,16 @@ def test_new_gkg_import_preserves_compatibility_registry(updated_assets, tmp_pat
     assert backend.metadata["semantic_update"]["status"] == "compatible_content_update"
 
 
-# 同池冻结 ONNX 尚在使用旧表时拒绝更新且不留下半套新模型
-def test_existing_frozen_onnx_prevents_pool_asset_replacement(updated_assets, tmp_path):
+# 同池冻结 ONNX 不阻止资产更新，导入结果明确指出图内知识仍旧
+def test_existing_frozen_onnx_warns_on_pool_asset_replacement(updated_assets, tmp_path):
     old, new = updated_assets
     package, metadata = write_updated_package(tmp_path, old, new)
     repository = LinkModelRepository(tmp_path / "link")
     repository.discover = Mock(return_value={"models": [{**old.identity, "model_id": metadata["model_id"], "format": "onnx"}]})
-    with pytest.raises(ValueError, match="同模型池已安装 ONNX"):
-        repository.import_gkg(package, package.name)
-    assert not list(repository.model_root.iterdir())
+    result = repository.import_gkg(package, package.name)
+    assert result["warnings"][0]["status"] == "frozen_onnx_outdated"
+    assert result["warnings"][0]["semantic_content_changed"] is True
+    assert (repository.model_root / "galatea_iter_1.pth").is_file()
 
 
 # 更新时合并既有历史证据而不改写原始部署包

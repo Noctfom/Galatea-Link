@@ -34,6 +34,7 @@ class CoreDecision:
     probability_margin: float
     policy_mode: str = "greedy"
     temperature: float | None = None
+    available_choice_ids: tuple[int, ...] = ()
 
 class AiBot:
     def __init__(self, device='cpu', net_config=None, initialize_network=True):
@@ -97,6 +98,8 @@ class AiBot:
             self.model_metadata = backend.metadata
             if backend.metadata.get("semantic_update"):
                 _console_print("♻️ [语义兼容更新] " + backend.metadata["semantic_update"]["message"])
+            if backend.metadata.get("asset_compatibility", {}).get("warning"):
+                _console_print("⚠️ [ONNX 资产警告] " + backend.metadata["asset_compatibility"]["message"])
             self.adapter_id = backend.adapter_id
             self.model_protocol_version = backend.metadata["model_protocol_version"]
             self.max_actions = backend.max_actions
@@ -203,6 +206,8 @@ class AiBot:
         *,
         policy_mode="greedy",
         temperature=0.8,
+        excluded_choice_ids=(),
+        soft_excluded_choice_ids=(),
     ):
         """按所选 Core 策略返回动作、置信度和协议响应"""
         if not self.model_available:
@@ -232,7 +237,21 @@ class AiBot:
         logits, _, _ = self._infer(tensor_dict)
 
         # 网络已经内置 act_mask 并把无效槽位变成极小值
-        valid_logits = np.asarray(logits)[0, :len(snap.valid_actions)]
+        valid_logits = np.asarray(logits, dtype=np.float64)[0, :len(snap.valid_actions)].copy()
+        eligible = np.isfinite(valid_logits) & (valid_logits > -64000.0)
+        for index in excluded_choice_ids:
+            if 0 <= index < len(eligible):
+                eligible[index] = False
+        available_choice_ids = tuple(int(index) for index in np.flatnonzero(eligible))
+        if not available_choice_ids:
+            return None
+        preferred = eligible.copy()
+        for index in soft_excluded_choice_ids:
+            if 0 <= index < len(preferred):
+                preferred[index] = False
+        # 软候选耗尽时恢复可编码选择，服务器硬拒绝始终保留
+        eligible = preferred if preferred.any() else eligible
+        valid_logits[~eligible] = -np.inf
         normalized_policy = str(policy_mode).strip().casefold()
         if normalized_policy not in {"greedy", "deployment"}:
             raise ValueError(f"不支持的 Core 动作策略: {policy_mode}")
@@ -270,6 +289,7 @@ class AiBot:
                 if normalized_policy == "deployment"
                 else None
             ),
+            available_choice_ids=available_choice_ids,
         )
 
     # 计算基础动作概率供复杂宏动作候选池进行两阶段筛选

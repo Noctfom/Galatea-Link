@@ -113,7 +113,9 @@ def public_metadata(inspected, assets, runtime):
             "online_inference_ready": False,
             "runtime_asset_identity": dict(assets.identity),
             "online_block_reason": "Link V4 在线历史、动态状态和编码对照尚未完成，当前仅接受完整离线 V4 快照"}
-    if inspected["semantic_lookup_hash"] != assets.lookup.prefix_hash(inspected["semantic_lookup_card_count"]):
+    if runtime.runtime_id == "onnxruntime":
+        metadata["asset_compatibility"] = assets.onnx_compatibility(inspected)
+    elif inspected["semantic_lookup_hash"] != assets.lookup.prefix_hash(inspected["semantic_lookup_card_count"]):
         metadata["semantic_update"] = {"status": "compatible_content_update",
             "source_semantic_lookup_hash": inspected["semantic_lookup_hash"],
             "runtime_semantic_lookup_hash": assets.identity["semantic_lookup_hash"],
@@ -126,7 +128,8 @@ def load_v4_backend(path, inspected, *, device="cpu", asset_path=None, providers
     from model_protocols.registry import ModelBackend
     from model_protocols.inference_runtime import OnnxInferenceRuntime, PyTorchInferenceRuntime
     assets = load_v4_assets(resolve_asset_directory(path, asset_path, inspected["model_id"]))
-    assets.validate(inspected, allow_semantic_updates=path.suffix.casefold() == ".pth")
+    frozen_onnx = path.suffix.casefold() == ".onnx"
+    assets.validate(inspected, allow_semantic_updates=not frozen_onnx, frozen_onnx=frozen_onnx)
     net = None
     if path.suffix.casefold() == ".onnx":
         runtime = OnnxInferenceRuntime(path, providers=providers, intra_op_threads=intra_op_threads)
@@ -149,5 +152,5 @@ def load_v4_backend(path, inspected, *, device="cpu", asset_path=None, providers
         net.load_state_dict(checkpoint["model_state_dict"], strict=True)
         net.eval()
         runtime = PyTorchInferenceRuntime(net, device)
-    encoder = GalateaEncoder(assets)
+    encoder = GalateaEncoder(assets, frozen_card_count=inspected["card_vocab_card_count"] if frozen_onnx else None)
     return ModelBackend(net, encoder, public_metadata(inspected, assets, runtime), MAX_ACTIONS, ADAPTER_ID, runtime, runtime.runtime_id)

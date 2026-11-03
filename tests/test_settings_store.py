@@ -34,6 +34,8 @@ decision:
                         "mode": "hybrid",
                         "core_policy_mode": "deployment",
                         "core_temperature": 1.3,
+                        "core_loop_retry_enabled": False,
+                        "core_loop_repeat_threshold": 7,
                     }
                 },
                 expected_revision=0,
@@ -72,6 +74,8 @@ decision:
             self.assertNotIn("password", payload["server"])
             self.assertNotIn("api_key", payload["llm"])
             self.assertEqual(restored.get_controls()["intervention"]["mode"], "hybrid")
+            self.assertFalse(restored.get_controls()["intervention"]["core_loop_retry_enabled"])
+            self.assertEqual(restored.get_controls()["intervention"]["core_loop_repeat_threshold"], 7)
             self.assertEqual(
                 restored.get_controls()["intervention"]["core_temperature"],
                 1.3,

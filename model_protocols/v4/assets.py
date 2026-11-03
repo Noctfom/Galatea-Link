@@ -1,4 +1,4 @@
-# V4 运行资产管理，严格验证精确词表和编译语义前缀且不自动重建资产
+# V4 运行资产管理，验证精确词表并按推理后端处理语义内容更新
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,11 +45,15 @@ class V4Assets:
     identity: dict
     _reader: object = None
 
-    # 校验制品及网络配置与已加载的资产协议完全一致
-    def validate(self, metadata, label="V4 制品", *, allow_semantic_updates=False):
+    # 校验结构和词表前缀，按运行时策略处理语义内容差异
+    def validate(self, metadata, label="V4 制品", *, allow_semantic_updates=False, frozen_onnx=False):
         from .protocol_schema import validate_protocol_metadata
         inspect_protocol_identity(metadata)
         with use_assets(self):
+            if frozen_onnx:
+                # 冻结图使用导出时语义，仅放宽外部内容哈希，保留结构与卡片编号前缀校验
+                candidate = {**metadata, "semantic_lookup_hash": self.lookup.prefix_hash(metadata["card_vocab_card_count"])}
+                return validate_protocol_metadata(candidate, label=label, card_vocabulary=self.vocabulary)
             if allow_semantic_updates and metadata.get("semantic_lookup_hash") != self.lookup.prefix_hash(metadata["card_vocab_card_count"]):
                 # 先按实际语义哈希校验其他所有协议字段，再验证旧语义坐标系证据
                 candidate = {**metadata, "semantic_lookup_hash": self.lookup.prefix_hash(metadata["card_vocab_card_count"])}
@@ -58,6 +62,18 @@ class V4Assets:
                 validate_semantic_update_compatibility(metadata, self.lookup, directory=self.root)
                 return dict(self.identity)
             return validate_protocol_metadata(metadata, label=label, card_vocabulary=self.vocabulary)
+
+    # 报告旧 ONNX 与新资产的内容差异，不宣称冻结图获得了新知识
+    def onnx_compatibility(self, metadata):
+        self.validate(metadata, frozen_onnx=True)
+        added = self.vocabulary.card_count - metadata["card_vocab_card_count"]
+        changed = metadata["semantic_lookup_hash"] != self.lookup.prefix_hash(metadata["card_vocab_card_count"])
+        stale = bool(added or changed)
+        return {"status": "frozen_onnx_outdated" if stale else "matched", "warning": stale,
+            "added_card_count": added, "semantic_content_changed": changed,
+            "frozen_card_count": metadata["card_vocab_card_count"],
+            "unknown_new_cards": True,
+            "message": "外部词表或语义已更新，继续使用旧 ONNX 图内语义；新增卡片按未知卡编码，既有卡片的语义修订也未写入图中" if stale else "ONNX 与运行资产一致"}
 
     # 延迟打开只读卡库且不影响纯元数据识别路径
     @property

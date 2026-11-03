@@ -23,6 +23,7 @@ from data_types import (
 from model_protocols.v3.effect_slot_binding import resolve_runtime_effect_slot
 from core.online_state import OnlineStateProjection, QUERY_FIELD_NAMES
 from core.response_history import OnlineResponseHistory, VisibleStateDigest
+from core.public_chain import PublicChainProgress
 
 # Link 接收标准网络消息流且不解析 Core 本地缓冲区的幽灵字节
 CORE_HAS_GHOST_BYTE = False
@@ -112,6 +113,7 @@ class MessageParser:
         
         # --- 伤害/数值 ---
         90: -1, 91: 5, 92: 5, 93: 8, 94: 5, 
+        95: 4, # UNEQUIP 仅包含装备来源的位置
         96: 8, 97: 8, # CARD_TARGET [已验证 4+4]
         100: 5, # PAY_LPCOST [已验证 1+4]
         101: 7, 102: 7, # COUNTER [已验证 2+1+1+1+2]
@@ -451,6 +453,7 @@ class DuelState:
         self.model_protocol_version = int(model_protocol_version)
         self.online_projection = OnlineStateProjection()
         self.response_history = OnlineResponseHistory()
+        self.public_chain_progress = PublicChainProgress()
         self._action_prompt_type = None
         self._initial_decks = {0: (None if p0_main is None else tuple(p0_main), None if p0_extra is None else tuple(p0_extra)),
             1: (None if p1_main is None else tuple(p1_main), None if p1_extra is None else tuple(p1_extra))}
@@ -486,6 +489,7 @@ class DuelState:
     def reset(self):
         self.online_projection = OnlineStateProjection()
         self.response_history.reset()
+        self.public_chain_progress = PublicChainProgress()
         self._action_prompt_type = None
         self._initial_decks = {0: (None, None), 1: (None, None)}
         self.turn = 0
@@ -668,6 +672,7 @@ class DuelState:
                     ),
                     'ct': ct,
                 })
+                self.public_chain_progress.begin(self.chain_stack[-1])
                 # 压入历史记事本 (最近发生的在最前面)
                 self.history_stack.insert(0, {
                     'code': code,
@@ -684,7 +689,11 @@ class DuelState:
                 if pure_code in self.known_hand_codes[tc]:
                     self.known_hand_codes[tc].remove(pure_code)
 
+            elif msg_type in (71, 72, 73, 75, 76):
+                self.public_chain_progress.observe(msg_type, struct.unpack('<B', stream.read(1))[0])
+
             elif msg_type == 74: # MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
+                self.public_chain_progress.observe(74)
                 self.chain_stack.clear()
 
             elif msg_type == 90: # DRAW (抽卡)
@@ -736,20 +745,10 @@ class DuelState:
             elif msg_type == 93:
                 equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
                 tgt_raw = struct.unpack('<I', stream.read(4))[0]   # 被装备怪兽的位置
-                ec, el, es, _ = LocationInfo.decode(equip_raw)
-                tc, tl, ts, _ = LocationInfo.decode(tgt_raw)
-                equip_info = self._get_card_info(ec, el, es)
-                target_info = self._get_card_info(tc, tl, ts)
-                if equip_info is not None and target_info is not None:
-                    equip_location = (ec, el, es)
-                    target_location = (tc, tl, ts)
-                    equip_info['equip_target'] = target_location
-                    equipped_by = target_info.setdefault('equipped_by', [])
-                    if equip_location not in equipped_by:
-                        equipped_by.append(equip_location)
-                    target_info['is_equipped'] = True
-                if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
-                    self.field_map[tc][tl][ts]['is_equipped'] = True
+                self._set_equip_relation(equip_raw, tgt_raw)
+
+            elif msg_type == 95:
+                self._set_equip_relation(struct.unpack('<I', stream.read(4))[0], 0)
 
             elif msg_type == 96:
                 source_raw, target_raw = struct.unpack('<II', stream.read(8))
@@ -869,22 +868,64 @@ class DuelState:
             )
             action.effect_slot = -1 if slot_index is None else slot_index
 
+    # 同步事件证明的位置关系与既有查询缓存，事件不冒充新查询
+    def _store_relation_fact(self, location, name, value):
+        info = self._get_card_info(*location)
+        if info is None:
+            return
+        key = {"equip_target": "equip_target_location_raw", "target_locations": "target_location_values"}[name]
+        info[key] = list(value) if isinstance(value, list) else value
+        info["relation_known_fields"] = tuple(sorted(set(info.get("relation_known_fields", ())) | {name}))
+        cached = self.online_projection.cards.get(location)
+        if cached is not None:
+            cached[name] = list(value) if isinstance(value, list) else value
+            if name == "equip_target":
+                cached["is_equip_source"] = bool(value)
+
+    # 设置或解除装备，来源和目标可独立缺失且不创建不存在的实体
+    def _set_equip_relation(self, source_raw, target_raw):
+        source = LocationInfo.decode(source_raw)[:3]
+        info = self._get_card_info(*source)
+        if info is None:
+            return
+        previous = info.get("equip_target")
+        if previous:
+            old_target = self._get_card_info(*previous)
+            if old_target is not None and source in old_target.get("equipped_by", []):
+                old_target["equipped_by"].remove(source)
+                old_target["is_equipped"] = bool(old_target["equipped_by"])
+        target = LocationInfo.decode(target_raw)[:3] if target_raw else None
+        info["equip_target"] = target
+        info["is_equip_source"] = bool(target_raw)
+        info["is_equipped"] = bool(target_raw or info.get("equipped_by"))
+        self._store_relation_fact(source, "equip_target", target_raw)
+        receiver = self._get_card_info(*target) if target else None
+        if receiver is not None:
+            sources = receiver.setdefault("equipped_by", [])
+            if source not in sources:
+                sources.append(source)
+            receiver["is_equipped"] = True
+
     # 添加卡片取对象和被取对象关系
     def _add_card_target_relation(self, source_raw, target_raw):
         sc, sl, ss, _ = LocationInfo.decode(source_raw)
         tc, tl, ts, _ = LocationInfo.decode(target_raw)
         source_info = self._get_card_info(sc, sl, ss)
         target_info = self._get_card_info(tc, tl, ts)
-        if source_info is None or target_info is None:
+        if source_info is None:
             return
         source_location = (sc, sl, ss)
         target_location = (tc, tl, ts)
         targets = source_info.setdefault('targets', [])
-        targeted_by = target_info.setdefault('targeted_by', [])
         if target_location not in targets:
             targets.append(target_location)
-        if source_location not in targeted_by:
-            targeted_by.append(source_location)
+        raw_targets = [raw for raw in source_info.get("target_location_values", [])
+            if LocationInfo.decode(raw)[:3] != target_location]
+        self._store_relation_fact(source_location, "target_locations", [*raw_targets, target_raw])
+        if target_info is not None:
+            targeted_by = target_info.setdefault('targeted_by', [])
+            if source_location not in targeted_by:
+                targeted_by.append(source_location)
 
     # 移除卡片取对象和被取对象关系
     def _remove_card_target_relation(self, source_raw, target_raw):
@@ -896,6 +937,9 @@ class DuelState:
         target_location = (tc, tl, ts)
         if source_info is not None and target_location in source_info.get('targets', []):
             source_info['targets'].remove(target_location)
+        if source_info is not None:
+            self._store_relation_fact(source_location, "target_locations", [raw
+                for raw in source_info.get("target_location_values", []) if LocationInfo.decode(raw)[:3] != target_location])
         if target_info is not None and source_location in target_info.get('targeted_by', []):
             target_info['targeted_by'].remove(source_location)
 
@@ -903,15 +947,21 @@ class DuelState:
     def _clear_relations_for_location(self, controller, location, sequence):
         removed_location = (controller, location, sequence)
         for player in (0, 1):
-            for zone_cards in self.field_map[player].values():
-                for info in zone_cards.values():
+            for zone, zone_cards in self.field_map[player].items():
+                for index, info in zone_cards.items():
                     if info.get('equip_target') == removed_location:
                         info['equip_target'] = None
+                        info['is_equip_source'] = False
+                        self._store_relation_fact((player, zone, index), "equip_target", 0)
+                    raw_targets = info.get("target_location_values", [])
+                    remaining = [raw for raw in raw_targets if LocationInfo.decode(raw)[:3] != removed_location]
+                    if remaining != raw_targets:
+                        self._store_relation_fact((player, zone, index), "target_locations", remaining)
                     for key in ('equipped_by', 'targets', 'targeted_by'):
                         relations = info.get(key, [])
                         if removed_location in relations:
                             relations.remove(removed_location)
-                    info['is_equipped'] = bool(info.get('equipped_by', []))
+                    info['is_equipped'] = bool(info.get('equipped_by', []) or info.get('is_equip_source'))
 
     def _parse_valid_actions(self, msg_type, stream):
         """
@@ -1767,6 +1817,7 @@ class DuelState:
                     entities[-1].query_sequence = info.get('query_sequence')
                     entities[-1].query_invalidated = bool(info.get('query_invalidated'))
                     entities[-1].query_inventory = bool(info.get('query_inventory'))
+                    entities[-1].relation_known_fields = info.get('relation_known_fields', ())
                     for name in ('current_code', 'original_owner', 'current_rank', 'link_rating', 'status_mask', 'is_equip_source', 'is_disabled', 'is_forbidden', 'properly_summoned', 'counter_items', 'reason'):
                         if name in info:
                             setattr(entities[-1], name, info[name])
@@ -1882,6 +1933,7 @@ class DuelState:
         snap.initial_deck_known = {player: all(item is not None for item in self._initial_decks[player]) for player in (0, 1)}
         snap.observed_transitions = self.response_history.snapshot()
         snap.observed_history_coverage = self.response_history.coverage()
+        snap.public_chain_progress = self.public_chain_progress.snapshot()
         snap.action_prompt_type = self._action_prompt_type if final_actions else None
         return snap
     

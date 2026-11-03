@@ -160,6 +160,7 @@ def project_online_snapshot(source, player, *, event_type=None, history_projecti
                 level=0, base_atk=0, base_def=0, is_public=False)
         else:
             known = set(getattr(entity, "query_known_fields", ()) or ())
+            known.update(getattr(entity, "relation_known_fields", ()))
             missing = sorted(CARD_QUERY_FIELDS - known)
             if missing:
                 missing_cards.append({"player": entity.owner, "zone": entity.location,

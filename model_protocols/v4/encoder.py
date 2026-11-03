@@ -9,10 +9,11 @@ from .runtime_context import use_assets
 
 class GalateaEncoder:
     # 为单个模型绑定独立词表语义和静态卡组缓存
-    def __init__(self, assets):
+    def __init__(self, assets, *, frozen_card_count=None):
         self.assets = assets
         with use_assets(assets):
-            self.encoder = CoreV4NumpyEncoder(card_vocabulary=assets.vocabulary)
+            vocabulary = assets.vocabulary if frozen_card_count is None else assets.vocabulary.prefix(frozen_card_count)
+            self.encoder = CoreV4NumpyEncoder(card_vocabulary=vocabulary)
 
     # 仅编码 V4 完整快照且不接受当前 Link 的不完整在线状态
     def encode(self, snapshot, player_id, *, output_format="numpy"):

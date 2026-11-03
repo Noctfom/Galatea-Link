@@ -384,6 +384,15 @@
                   <input id="coreTemperatureInput" type="number" min="0.05" max="5" step="0.05">
                   <small>仅温度采样生效，低温更稳定，高温更随机</small>
                 </label>
+                <label class="switch-row full-field">
+                  <input id="coreLoopRetryInput" type="checkbox">
+                  <span class="switch-control" aria-hidden="true"></span>
+                  <span class="label-with-help">Core 闭环回退 <button class="help-button" type="button" aria-label="查看闭环回退说明" data-help-title="Core 闭环回退" data-help-body="同一局面反复进入效果选择后又取消，累计达到阈值才优先尝试末端其他候选，耗尽后再换上层入口。正常首次取消和推进中的多选不受影响，只约束 Core 建议，不改动 LLM 的合法动作，服务器明确拒绝的动作始终保留禁用">?</button></span>
+                </label>
+                <label class="field">
+                  <span class="label-with-help">闭环重复阈值 <button class="help-button" type="button" aria-label="查看闭环阈值说明" data-help-title="闭环重复阈值" data-help-body="默认累计 5 次闭合回退后调整。较小值会更早尝试其他分支，较大值保留更多原策略重试机会。不是网络重连次数，也不是同名提示出现次数">?</button></span>
+                  <input id="coreLoopThresholdInput" type="number" min="1" max="100" step="1">
+                </label>
                 <label class="field range-field">
                   <span class="label-with-help">Core 置信度阈值 <button class="help-button" type="button" aria-label="查看 Core 置信度阈值说明" data-help-title="Core 置信度阈值" data-help-body="只在 hybrid 模式决定是否调用 LLM。Core 所选动作概率低于阈值时交给 LLM，调高会增加 LLM 调用和费用，调低会更多信任 Core">?</button> <output id="thresholdOutput">0.65</output></span>
                   <input id="thresholdInput" type="range" min="0" max="1" step="0.01" value="0.65">

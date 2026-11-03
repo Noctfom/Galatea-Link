@@ -322,19 +322,31 @@ class LinkModelRepository:
             with zipfile.ZipFile(source, "r") as archive:
                 self._safe_extract(archive, stage_root)
             validated = self._validate_stage(stage_root)
+            compatibility_warnings = []
+            frozen_pool_only = False
             if validated["protocol"] == 4 and not (validated["model_id"] or target_model_id):
                 raise ValueError("V4 纯资产包必须明确绑定目标模型 UUID")
             if validated["protocol"] == 4:
                 from model_protocols.v4.assets import load_v4_assets
                 staged_assets = load_v4_assets(stage_root)
                 target = self.project_root / "model_assets" / "v4" / (validated["model_id"] or target_model_id)
+                pool_models = [item for item in self.discover()["models"] if item.get("model_protocol_version") == 4
+                    and item.get("model_id") == (validated["model_id"] or target_model_id)]
+                frozen_pool_only = not any(item.get("format") == "pytorch_checkpoint" for item in pool_models)
                 if (target / "card_vocab.json").is_file():
-                    self._merge_v4_compatibility(stage_root, target, validated)
-                    staged_assets.validate(load_v4_assets(target).identity, "已安装 V4 资产前缀", allow_semantic_updates=True)
-                for inspected in self.discover()["models"]:
-                    if inspected.get("format") == "onnx" and inspected.get("model_protocol_version") == 4 and inspected.get("model_id") == (validated["model_id"] or target_model_id):
-                        # 冻结图内语义不能随同池 PTH 一起热更新
-                        staged_assets.validate(inspected, "同模型池已安装 ONNX，请保留其原语义资产或重新导出")
+                    try:
+                        self._merge_v4_compatibility(stage_root, target, validated)
+                    except ValueError:
+                        # 纯冻结图不依赖外部语义标签证据，保留新包自洽的目录即可
+                        if not frozen_pool_only:
+                            raise
+                    staged_assets.validate(load_v4_assets(target).identity, "已安装 V4 资产前缀",
+                        allow_semantic_updates=not frozen_pool_only, frozen_onnx=frozen_pool_only)
+                for inspected in [*pool_models, *validated["records"]]:
+                    if inspected.get("format") == "onnx":
+                        compatibility = staged_assets.onnx_compatibility(inspected)
+                        if compatibility["warning"]:
+                            compatibility_warnings.append({"primary": inspected.get("primary"), **compatibility})
             installed_files = self._install_models(
                 stage_root,
                 validated["manifest"]["model_files_included"],
@@ -344,6 +356,7 @@ class LinkModelRepository:
                 validated["model_id"] or target_model_id,
                 validated["asset_files"],
                 protocol=validated["protocol"],
+                frozen_pool_only=frozen_pool_only,
             )
         return {
             "package_name": package_name,
@@ -355,6 +368,7 @@ class LinkModelRepository:
             "installed_files": installed_files,
             "installed_asset_files": list(validated["asset_files"]),
             "assets_path": assets_path,
+            "warnings": compatibility_warnings,
         }
 
     # 在暂存区合并兼容历史并保留已验证的旧资产来源，不修改输入部署包
@@ -587,7 +601,7 @@ class LinkModelRepository:
             if protocol != package_protocol:
                 raise ValueError("GKG 模型协议版本当前未启用")
             if v4_assets is not None:
-                v4_assets.validate(dict(record), "GKG V4 模型记录", allow_semantic_updates=record.get("format") == "pytorch_checkpoint")
+                v4_assets.validate(dict(record), "GKG V4 模型记录", allow_semantic_updates=record.get("format") == "pytorch_checkpoint", frozen_onnx=record.get("format") == "onnx")
             iteration = record.get("iteration")
             if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
                 raise ValueError("GKG 模型轮次无效")
@@ -613,7 +627,7 @@ class LinkModelRepository:
 
             described = self._describe_staged_model(stage_root / primary)
             if v4_assets is not None:
-                v4_assets.validate(described, "GKG V4 模型本体", allow_semantic_updates=model_format == "pytorch_checkpoint")
+                v4_assets.validate(described, "GKG V4 模型本体", allow_semantic_updates=model_format == "pytorch_checkpoint", frozen_onnx=model_format == "onnx")
                 from model_protocols.v4.assets import PROTOCOL_IDENTITY_KEYS
                 if any(described.get(key) != record.get(key) for key in PROTOCOL_IDENTITY_KEYS):
                     raise ValueError("GKG V4 模型记录与本体协议身份不一致")
@@ -643,7 +657,7 @@ class LinkModelRepository:
             if marker_path.is_file():
                 artifact_manifest = read_artifact_manifest(marker_path)
                 if v4_assets is not None:
-                    v4_assets.validate(artifact_manifest, "GKG V4 制品清单", allow_semantic_updates=model_format == "pytorch_checkpoint")
+                    v4_assets.validate(artifact_manifest, "GKG V4 制品清单", allow_semantic_updates=model_format == "pytorch_checkpoint", frozen_onnx=model_format == "onnx")
                     if any(artifact_manifest.get(key) != described.get(key) for key in PROTOCOL_IDENTITY_KEYS):
                         raise ValueError("GKG V4 制品清单与模型本体协议身份不一致")
                 for key, expected in (
@@ -750,6 +764,7 @@ class LinkModelRepository:
         model_id: str | None,
         filenames: list[str],
         protocol: int = 3,
+        frozen_pool_only: bool = False,
     ) -> str | None:
         if not filenames:
             return None
@@ -760,7 +775,8 @@ class LinkModelRepository:
             from model_protocols.v4.assets import load_v4_assets
             if all((target_root / name).is_file() for name in required):
                 old_assets = load_v4_assets(target_root)
-                load_v4_assets(stage_root).validate(old_assets.identity, "已安装 V4 资产前缀", allow_semantic_updates=True)
+                load_v4_assets(stage_root).validate(old_assets.identity, "已安装 V4 资产前缀",
+                    allow_semantic_updates=not frozen_pool_only, frozen_onnx=frozen_pool_only)
         target_root.mkdir(parents=True, exist_ok=True)
         for filename in filenames:
             replace_runtime_asset(
@@ -768,6 +784,10 @@ class LinkModelRepository:
                 target_root / filename,
             )
         if protocol == 4:
+            from model_protocols.v4.semantic_compatibility import SEMANTIC_COMPATIBILITY_FILENAME
+            old_registry = target_root / SEMANTIC_COMPATIBILITY_FILENAME
+            if frozen_pool_only and SEMANTIC_COMPATIBILITY_FILENAME not in filenames and old_registry.is_file():
+                old_registry.unlink()
             from model_protocols.v4.assets import load_v4_assets
             load_v4_assets(target_root)
             return f"./{target_root.relative_to(self.project_root).as_posix()}"

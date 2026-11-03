@@ -5,6 +5,13 @@
   "schema_revision": 14,
   "maintenance_sources": [
     {
+      "commit": "5be189a1c6881322ccefa2095a8f59fb8361a751",
+      "purpose": "参考竞技场 leaf_first_v1 闭环回退，Link 重新实现为无 Torch 的异步部署策略，不修改模型输入",
+      "source_sha256_bytes": {
+        "model_versus.py": "8b9406b3ec3f4c39bc9c2443813d708693857b030636a0d5e27e0b104c491431"
+      }
+    },
+    {
       "commit": "f83f700e1624dda70531d6bdb51b5fd40e3d4916",
       "purpose": "语义兼容证据及坐标系元数据，补齐事件目标位置与身份的等长填充，未改变模型输入结构",
       "source_sha256_bytes": {

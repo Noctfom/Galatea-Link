@@ -64,6 +64,9 @@ decision:
   agent_backend: "local"
   core_policy_mode: "greedy"
   core_temperature: 0.8
+  # 同一局面反复取消后优先改选末端候选，只约束 Core 建议
+  core_loop_retry_enabled: true
+  core_loop_repeat_threshold: 5
   core_confidence_threshold: 0.65
   force_llm_message_types: []
   include_core_suggestion: true

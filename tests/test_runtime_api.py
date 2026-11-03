@@ -39,6 +39,20 @@ class FakeLink:
 
 
 class RuntimeApiTests(unittest.IsolatedAsyncioTestCase):
+    # 统一控制面可调整闭环开关与阈值，非法补丁不能破坏现有配置
+    async def test_loop_retry_controls_are_atomic(self):
+        bus = LinkEventBus()
+        api = GalateaRuntimeApi(FakeLink(), bus)
+        current = await api.update_controls({"intervention": {
+            "core_loop_retry_enabled": False, "core_loop_repeat_threshold": 7}})
+        self.assertFalse(current["intervention"]["core_loop_retry_enabled"])
+        for value in (0, 101, True, "5", 1.5):
+            with self.assertRaises(ValueError):
+                await api.update_controls({"intervention": {"core_loop_repeat_threshold": value}})
+            self.assertEqual(api.get_controls()["revision"], current["revision"])
+            self.assertEqual(api.get_controls()["intervention"]["core_loop_repeat_threshold"], 7)
+        bus.close()
+
     # 验证状态接口不暴露配置密钥并返回决策摘要
     async def test_returns_runtime_status(self):
         bus = LinkEventBus()

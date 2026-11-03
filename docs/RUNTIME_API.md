@@ -58,6 +58,8 @@ updated = await link.runtime.update_controls(
             "mode": "hybrid",
             "core_policy_mode": "deployment",
             "core_temperature": 0.8,
+        "core_loop_retry_enabled": True,
+        "core_loop_repeat_threshold": 5,
             "core_confidence_threshold": 0.5,
             "force_llm_message_types": [13, 16],
             "include_core_suggestion": True,
@@ -121,6 +123,21 @@ AstrBot 可通过 `POST /api/v1/external-message` 把 QQ 消息投递为 `extern
 卡库和语义资产只允许在 Link 会话停止时替换。142 兜底池可以随时保存，运行中修改会在下一次会话生效。本机语义化是可选重型功能，仅调用该入口时才加载 `requirements-semantic.txt` 中的依赖
 
 `update_intervention` 仍作为旧调用方式保留，但内部同样经过统一控制面
+
+## Core 闭环回退
+
+3.3.3 在贪心与温度采样两种 Core 策略下启用 `leaf_first_v1`，V3 在线模型可以直接使用，V4 在线推理限制保持不变。配置文件 `decision`、`GET/PATCH /api/v1/controls` 的 `intervention` 分区以及 WebUI 决策策略共用以下字段，停止状态也可以保存
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `core_loop_retry_enabled` | `true` | 启用 Core 闭环软避让 |
+| `core_loop_repeat_threshold` | `5` | 累计闭合回退次数，整数 1～100 |
+
+例如反复“选择发动 → 进入选择 → 取消 → 返回同一主菜单”，累计达到阈值后先换最末端选择。末端可尝试候选耗尽才向父入口传播，首次正常取消和没有回退证据的连续多选不计循环。真实局面变化、对局重置、关闭开关或修改阈值会清理旧软证据；每个提示按实际分支上下文隔离
+
+服务器 `MSG_RETRY` 属于硬拒绝，不计闭环次数。Core 在其余可编码候选中重选，所有软候选耗尽后仅恢复软选择，始终保留硬拒绝。概率和置信度基于当前可尝试候选计算。LLM／AstrBot／dsh 的合法菜单不受软避让裁剪，硬拒绝及具有相同网络响应的候选仍会移除
+
+该策略在 Link 内运行，不新增引擎查询、模拟或搜索，不加载 Torch，也不把防循环信息附加到模型输入或 LLM 提示。真实提交在网络等待前暂存，写出失败、取消与旧对局回调不会留下有效软分支。事件 `core.loop.adjusted` 给出触发次数、提示类型、候选编号和深度，`core.loop.released` 表示软候选耗尽；这些事件不包含卡组或原始响应
 
 ## LLM 自主介入
 

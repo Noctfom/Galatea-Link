@@ -88,6 +88,8 @@ class DecisionConfig:
     agent_backend: str = "local"
     core_policy_mode: str = "greedy"
     core_temperature: float = 0.8
+    core_loop_retry_enabled: bool = True
+    core_loop_repeat_threshold: int = 5
     core_confidence_threshold: float = 0.65
     force_llm_message_types: tuple[int, ...] = ()
     include_core_suggestion: bool = True
@@ -350,11 +352,16 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
     core_temperature = float(decision_raw.get("core_temperature", 0.8))
     if not 0.05 <= core_temperature <= 5.0:
         raise ValueError("配置项 decision.core_temperature 必须位于 0.05 到 5.0")
+    loop_threshold = decision_raw.get("core_loop_repeat_threshold", 5)
+    if type(loop_threshold) is not int or not 1 <= loop_threshold <= 100:
+        raise ValueError("配置项 decision.core_loop_repeat_threshold 必须为 1 到 100 的整数")
     decision = DecisionConfig(
         mode=decision_mode,
         agent_backend=agent_backend,
         core_policy_mode=core_policy_mode,
         core_temperature=core_temperature,
+        core_loop_retry_enabled=_as_bool(decision_raw.get("core_loop_retry_enabled", True), "decision.core_loop_retry_enabled"),
+        core_loop_repeat_threshold=loop_threshold,
         core_confidence_threshold=confidence_threshold,
         force_llm_message_types=_as_int_tuple(
             decision_raw.get("force_llm_message_types", []),

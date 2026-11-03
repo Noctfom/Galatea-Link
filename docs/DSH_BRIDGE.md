@@ -56,7 +56,7 @@ HTTP、事件流、临时会话、卡组、动态控制和决策身份接口继�
 
 ## 版本与验证边界
 
-Link 服务版本为 `3.2.0`，插件版本独立为 `0.1.0`。插件适配本地 dsh `0.1.7-rc.1` 的 `subagents.start`，以及官方 `0.2.1-rc.2` 的 `subagents.startActivation`
+桥接能力从 Link `3.2.0` 提供，Link 当前版本见根目录更新记录，插件版本独立为 `0.1.0`。插件适配本地 dsh `0.1.7-rc.1` 的 `subagents.start`，以及官方 `0.2.1-rc.2` 的 `subagents.startActivation`
 
 本地旧版本已经使用真实 Cordis、工具注册器、AgentLoop 和 fork 后端测试，通过确定性模型确认上下文继承、结构化动作和摘要注入；HTTP/WebSocket 闭环也由真实 Link 服务验证。现代入口通过接口契约测试，尚未在升级后的完整 dsh 实例运行。真实模型延迟、实际游戏服务器与长时间对局需要现场联调
 

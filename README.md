@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.3.2-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.3.4-6b8f71)
 
 </div>
 
@@ -23,6 +23,7 @@ Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://gith
 - 加载模型协议 V3 的 PyTorch 或 ONNX 模型，支持 GKG 格式 2 导入和模型资产校验
 - 导入 V4 GKG 格式 4、精确词表和编译语义，支持独立 PTH／ONNX 离线推理，暂未开放 V4 在线决策
 - `core_only`、`hybrid`、`llm_review`、`llm_only` 四种决策模式
+- Core 闭环回退采用末端优先策略，可在 WebUI 和统一 API 调整开关与重复阈值
 - Link 内置 OpenAI Compatible LLM，支持结构化动作、静态前缀缓存、请求诊断和安全回退
 - AstrBot 作为主智能体远程决策、游戏内聊天、查卡、卡组导入及会话隔离的临时卡组编辑
 - 玩家可见观察、远程合法动作提交、运行时控制、WebSocket 事件流和低开销赛后摘要

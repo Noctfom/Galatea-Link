@@ -620,6 +620,7 @@ class GalateaLink:
                             await self._schedule_decision(
                                 self.last_prompt_type,
                                 self.last_prompt_msg,
+                                engine_retry=True,
                             )
                         continue 
                     
@@ -677,18 +678,20 @@ class GalateaLink:
             await client_close()
 
     # 创建独立快照并提交后台决策任务
-    async def _schedule_decision(self, msg_type, raw_msg, snapshot=None):
+    async def _schedule_decision(self, msg_type, raw_msg, snapshot=None, *, engine_retry=False):
         self.last_prompt_actions = copy.deepcopy(getattr(self.gamestate, "current_valid_actions", ()))
         snap = snapshot or self.gamestate.get_snapshot()
+        self._prepare_core_retry(snap, msg_type, raw_msg, engine_retry=engine_retry)
         if snapshot is None:
             self._capture_llm_observation(msg_type, snap)
 
         decision_observation = copy.deepcopy(self.latest_observation)
-        if decision_observation is not None and self.ignore_choice_ids_blacklist:
+        hard_bans = set(getattr(snap, "core_hard_banned_choice_ids", self.ignore_choice_ids_blacklist))
+        if decision_observation is not None and hard_bans:
             decision_observation["legal_actions"] = [
                 action
                 for action in decision_observation.get("legal_actions", [])
-                if action.get("choice_id") not in self.ignore_choice_ids_blacklist
+                if action.get("choice_id") not in hard_bans
             ]
             decision_observation["decision_required"] = bool(
                 decision_observation["legal_actions"]
@@ -909,6 +912,43 @@ class GalateaLink:
             self.last_v4_diagnostics = {"schema_version": "galatea.v4_observation_diagnostics.v1",
                 "available": True, "diagnostic_only": True, "online_inference_ready": False,
                 "groups": {}, "blocking_reasons": ["mapping_failed"], "error_type": type(error).__name__}
+
+    # 为当前提示建立硬拒绝与末端软避让，附加属性不进入 LLM 或模型输入
+    def _prepare_core_retry(self, snapshot, msg_type, raw_msg, *, engine_retry=False):
+        from core.branch_retry import LOOP_POLICY, CoreBranchRetry
+        from core.response_history import response_bytes
+        config = getattr(getattr(self, "decision_policy", None), "config", None)
+        if config is None:
+            return
+        threshold = config.core_loop_repeat_threshold
+        if getattr(self, "_branch_retry", None) is None or self._branch_retry.threshold != threshold:
+            self._branch_retry = CoreBranchRetry(threshold)
+        hard = set(getattr(self, "ignore_choice_ids_blacklist", ()))
+        for index in range(len(snapshot.valid_actions)):
+            try:
+                wire = response_bytes(self.ai.pack_choice_from_snapshot(snapshot, index, msg_type))
+                if any(wire == response_bytes(item) for item in getattr(self, "ignore_actions_blacklist", ())):
+                    hard.add(index)
+            except (AttributeError, ValueError, TypeError, OverflowError, struct.error):
+                continue
+        snapshot.core_hard_banned_choice_ids = tuple(sorted(hard))
+        snapshot.core_soft_banned_choice_ids = ()
+        if not config.core_loop_retry_enabled or config.mode == "llm_only":
+            self._branch_retry.reset()
+            return
+        if msg_type == 16 and len(raw_msg) == 12 and raw_msg[2] == 0:
+            return
+        try:
+            changes, released = self._branch_retry.enter(snapshot, msg_type, raw_msg[1:],
+                hard_bans=hard, engine_retry=engine_retry)
+            if changes:
+                _console_print(f"🔁 [Core 闭环回退] 同局面累计 {threshold} 次，优先尝试末端其他候选")
+                self._publish_event("core.loop.adjusted", {"policy": LOOP_POLICY, "changes": changes})
+            if released:
+                self._publish_event("core.loop.released", {"message_type": msg_type, "hard_bans_preserved": True})
+        except (AttributeError, TypeError, ValueError) as error:
+            self._branch_retry.reset()
+            self._publish_event("core.loop.unavailable", {"error_type": type(error).__name__})
 
     # 返回最新观察副本供后续 LLM 和 AstrBot 接口读取
     def get_latest_llm_observation(self):
@@ -1151,6 +1191,8 @@ class GalateaLink:
         self.gamestate.reset()
         if getattr(self, "_v4_projector", None) is not None:
             self._v4_projector.reset()
+        if getattr(self, "_branch_retry", None) is not None:
+            self._branch_retry.reset()
         self.ai_core_player_id = None
         self.time_player = None
         self.time_left = {0: None, 1: None}
@@ -1178,7 +1220,7 @@ class GalateaLink:
             return DecisionOutcome(response=rule_decision, source="rule")
 
         core_decision = None
-        if self.decision_policy.should_run_core() and not request.ignore_actions:
+        if self.decision_policy.should_run_core():
             core_decision = await self._compute_core_decision(request)
             if core_decision is not None:
                 self._publish_event(
@@ -1314,11 +1356,16 @@ class GalateaLink:
         ):
             return None
         try:
+            retry_options = {}
+            hard = getattr(request.snapshot, "core_hard_banned_choice_ids", ())
+            soft = getattr(request.snapshot, "core_soft_banned_choice_ids", ())
+            if hard or soft:
+                retry_options = {"excluded_choice_ids": hard, "soft_excluded_choice_ids": soft}
             loop = asyncio.get_running_loop()
             async with asyncio.timeout(
                 self.decision_policy.config.core_time_budget
             ):
-                return await loop.run_in_executor(
+                decision = await loop.run_in_executor(
                     getattr(self, "policy_executor", None),
                     functools.partial(
                         self.ai.get_scored_decision_from_snapshot,
@@ -1326,8 +1373,12 @@ class GalateaLink:
                         request.msg_type,
                         policy_mode=self.decision_policy.config.core_policy_mode,
                         temperature=self.decision_policy.config.core_temperature,
+                        **retry_options,
                     ),
                 )
+                if decision is not None:
+                    request.snapshot.core_retry_available_choice_ids = getattr(decision, "available_choice_ids", None) or None
+                return decision
         except TimeoutError:
             self._trip_core_circuit_breaker(
                 "decision_inference",
@@ -1375,8 +1426,15 @@ class GalateaLink:
             chat_message = outcome.chat_message
         self.latest_chat_suggestion = chat_message
         tracker = getattr(getattr(self, "gamestate", None), "response_history", None)
+        branch = getattr(self, "_branch_retry", None)
+        branch_token = None
         token = None
         empty_chain = request.msg_type == 16 and len(request.raw_msg) == 12 and request.raw_msg[2] == 0
+        if branch is not None and not empty_chain and self.decision_policy.config.core_loop_retry_enabled:
+            _, selected = self._match_submitted_action(request, outcome)
+            if selected is not None:
+                branch_token = branch.stage(request.snapshot, selected,
+                    available=getattr(request.snapshot, "core_retry_available_choice_ids", None))
         if tracker is not None and tracker.perspective in (0, 1) and not empty_chain:
             action, choice_id = self._match_submitted_action(request, outcome)
             token = tracker.prepare(request_id=request.request_id, actor=tracker.perspective,
@@ -1394,6 +1452,8 @@ class GalateaLink:
                 else:
                     tracker.abort(token, "transport_confirmation_unavailable")
         except BaseException:
+            if branch is not None:
+                branch.abort(branch_token)
             if tracker is not None and token is not None:
                 tracker.abort(token)
             raise

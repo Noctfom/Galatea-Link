@@ -212,6 +212,6 @@ async def test_retry_restores_original_prompt_actions_after_hint():
     link.gamestate.update(160, struct.pack("<IBI", 0, 0, 0))
     assert link.gamestate.current_valid_actions == []
     await link.handle_server_msg(1, bytes([1]))
-    link._schedule_decision.assert_awaited_once_with(15, b"prompt")
+    link._schedule_decision.assert_awaited_once_with(15, b"prompt", engine_retry=True)
     assert link.gamestate.current_valid_actions[0].macro_targets == [raw_location]
     assert link.gamestate.current_valid_actions[0].decision_bytes == b"\1\0"

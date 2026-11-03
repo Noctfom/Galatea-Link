@@ -13,10 +13,10 @@ from model_protocols.v4.data_types import GlobalFeature, CardEntity, GameAction,
 
 
 # 生成结构及逻辑身份完整的最小编译语义资产
-def write_v4_assets(root, *, semantic_number=0.0, code_contract=None):
+def write_v4_assets(root, *, semantic_number=0.0, code_contract=None, cards=None, categories=None):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    vocabulary = CardVocabulary({14558127: 10, 89631139: 11}, capacity=32)
+    vocabulary = CardVocabulary(cards if cards is not None else {14558127: 10, 89631139: 11}, capacity=32)
     (root / "card_vocab.json").write_text(json.dumps(vocabulary.to_payload()), encoding="utf-8")
     arrays = {
         "category": np.zeros((32, 8, 8), np.int16),
@@ -34,14 +34,14 @@ def write_v4_assets(root, *, semantic_number=0.0, code_contract=None):
     arrays["number"][10, 0, 0] = semantic_number
     arrays["code_index"][10, 0] = 1
     arrays["code_dictionary"][1] = np.linspace(-1, 1, 384)
-    lookup = StaticSemanticLookup(card_vocabulary=vocabulary, category_to_index={"<PAD>": 0, "<UNK>": 1}, requirement_to_index={}, semantic_card_slots={14558127: (0,)}, runtime_effect_bindings={(14558127, 14558127 * 16): 0}, **arrays)
+    lookup = StaticSemanticLookup(card_vocabulary=vocabulary, category_to_index=categories or {"<PAD>": 0, "<UNK>": 1}, requirement_to_index={}, semantic_card_slots={14558127: (0,)}, runtime_effect_bindings={(14558127, 14558127 * 16): 0}, **arrays)
     table = root / "semantic_lookup_v1.npz"
     np.savez(table, **arrays)
     catalog = {
         "format_version": 1, "table_file": table.name, "table_size": table.stat().st_size,
         "table_sha256": hashlib.sha256(table.read_bytes()).hexdigest(),
         "card_vocab_hash": vocabulary.vocabulary_hash, "card_vocab_size": 32,
-        "card_vocab_card_count": 2, "semantic_lookup_card_count": 2,
+        "card_vocab_card_count": vocabulary.card_count, "semantic_lookup_card_count": vocabulary.card_count,
         "semantic_lookup_hash": lookup.prefix_hash(),
         "arrays": {name: {"dtype": array.dtype.str, "shape": list(array.shape)} for name, array in arrays.items()},
         "category_to_index": lookup.category_to_index, "requirement_to_index": {},
