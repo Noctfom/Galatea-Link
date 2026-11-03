@@ -22,6 +22,7 @@ from data_types import (
 )
 from model_protocols.v3.effect_slot_binding import resolve_runtime_effect_slot
 from core.online_state import OnlineStateProjection, QUERY_FIELD_NAMES
+from core.response_history import OnlineResponseHistory, VisibleStateDigest
 
 # Link 接收标准网络消息流且不解析 Core 本地缓冲区的幽灵字节
 CORE_HAS_GHOST_BYTE = False
@@ -449,6 +450,10 @@ class DuelState:
         self.recently_confirmed = []
         self.model_protocol_version = int(model_protocol_version)
         self.online_projection = OnlineStateProjection()
+        self.response_history = OnlineResponseHistory()
+        self._action_prompt_type = None
+        self._initial_decks = {0: (None if p0_main is None else tuple(p0_main), None if p0_extra is None else tuple(p0_extra)),
+            1: (None if p1_main is None else tuple(p1_main), None if p1_extra is None else tuple(p1_extra))}
         self.effect_slot_resolver = resolve_runtime_effect_slot
         self.asset_dir = Path(asset_dir).resolve() if asset_dir else None
         self.meta_staples = self._load_meta_staples()
@@ -480,6 +485,9 @@ class DuelState:
 
     def reset(self):
         self.online_projection = OnlineStateProjection()
+        self.response_history.reset()
+        self._action_prompt_type = None
+        self._initial_decks = {0: (None, None), 1: (None, None)}
         self.turn = 0
         self.phase = 0
         self.my_lp = 8000
@@ -500,6 +508,7 @@ class DuelState:
         """解析消息，更新状态 + 解析合法动作"""
         if msg_type == 4:
             start = self.online_projection.start(msg_payload)
+            self.response_history.bind(start["perspective"])
             self.my_lp, self.op_lp = start["lp"]
             return
         if msg_type in (6, 7):
@@ -510,6 +519,7 @@ class DuelState:
                 raise ValueError("交互玩家与 Start 固定的物理座位不一致，拒绝重新认领对手座位")
         self.online_projection.observe_event(msg_type, msg_payload, hand_counts=tuple(
             len(self.field_map[player].get(Zone.HAND, {})) for player in (0, 1)))
+        self._invalidate_query_facts()
         if msg_type == 90 and self.online_projection.last_known_draws:
             self.known_hand_codes[msg_payload[0]].extend(self.online_projection.last_known_draws)
         minimum_length = INTERACTION_MIN_PAYLOAD_LENGTHS.get(msg_type)
@@ -766,16 +776,81 @@ class DuelState:
                     msg_payload,
                 )
                 self._parse_valid_actions(msg_type, stream)
+                self._action_prompt_type = msg_type
                 self._bind_action_effect_slots()
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
             elif msg_type != 1: 
                 self.current_valid_actions = []
+            self.response_history.observe(msg_type, msg_payload, self.history_digest(),
+                interaction=msg_type in INTERACTION_MESSAGE_TYPES and not (msg_type == 16 and len(msg_payload) == 11 and msg_payload[1] == 0))
 
         except Exception as e:
             print(f"⚠️ [GameState] update消息解析失败: {e}")
             # 抛出异常，击毙这局烂尾游戏
             raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+
+    # 固定本方初始构筑并与动态剩余库存分离
+    def set_own_deck(self, player, main, extra):
+        if player not in (0, 1):
+            raise ValueError("初始构筑缺少有效玩家座位")
+        self._initial_decks = {0: (None, None), 1: (None, None)}
+        self._initial_decks[player] = (tuple(main), tuple(extra))
+
+    # 生成只含公开资源计数的历史摘要，不调用或结算快照
+    def history_digest(self):
+        counts = []
+        for player in (0, 1):
+            for zone in (1, 2, 4, 8, 16, 32, 64, 128):
+                if zone == Zone.OVERLAY:
+                    count = sum(len(info.get("overlays", ())) for cards in self.field_map[player].values() for info in cards.values())
+                else:
+                    fallback = len((self.p0_deck if player == 0 else self.p1_deck)) if zone == 1 else len((self.p0_extra if player == 0 else self.p1_extra)) if zone == 64 else len(self.field_map[player].get(zone, {}))
+                    count = self.online_projection.counts.get((player, zone), fallback) if zone in (1, 64) else fallback
+                counts.append(count)
+        return VisibleStateDigest(self.my_lp, self.op_lp, tuple(counts), len(self.chain_stack))
+
+    # 清除失效实例及指向旧槽位的查询事实，同时保留未受影响卡片
+    def _invalidate_query_facts(self):
+        projection = self.online_projection
+        if not projection.invalidated_locations:
+            return
+        dynamic = {name for names in QUERY_FIELD_NAMES.values() for name in names} - {"code", "position"}
+        for player in (0, 1):
+            for zone, cards in self.field_map[player].items():
+                for index, info in cards.items():
+                    known = set(info.get("online_query_fields", ()))
+                    if projection.location_invalidated((player, zone, index)) and known:
+                        for name in dynamic:
+                            info.pop(name, None)
+                        for name in ("equip_target", "targets", "equip_target_location_raw", "target_location_values"):
+                            info.pop(name, None)
+                        info["online_query_fields"] = tuple(sorted(known & {"code", "position"}))
+                        info["query_sequence"] = None
+                        info["query_invalidated"] = True
+                    else:
+                        for name, raw_key, aliases in (
+                            ("reason_card", "reason_card", ()),
+                            ("equip_target", "equip_target_location_raw", ("equip_target", "is_equip_source")),
+                        ):
+                            raw = info.get(raw_key, 0)
+                            if raw and projection.location_invalidated(LocationInfo.decode(raw)[:3]):
+                                info.pop(raw_key, None)
+                                for alias in aliases:
+                                    info.pop(alias, None)
+                                known.discard(name)
+                                known.difference_update(aliases)
+                                cached = projection.cards.get((player, zone, index), {})
+                                for field in (name, *aliases):
+                                    cached.pop(field, None)
+                        values = info.get("target_location_values", ())
+                        if any(projection.location_invalidated(LocationInfo.decode(raw)[:3]) for raw in values):
+                            info.pop("target_location_values", None)
+                            info.pop("targets", None)
+                            known.discard("target_locations")
+                            projection.cards.get((player, zone, index), {}).pop("target_locations", None)
+                        if "online_query_fields" in info:
+                            info["online_query_fields"] = tuple(sorted(known))
 
     # 获取指定场上位置保存的卡片状态
     def _get_card_info(self, controller, location, sequence):
@@ -1558,6 +1633,7 @@ class DuelState:
             if fields.get("code") and old.get("code") and not same:
                 self.online_projection.public_context.forget_instance(actor, zone, index)
             info = {"code": fields.get("code", 0), "pos": fields.get("position", 0), "owner": actor}
+            info["query_inventory"] = zone == Zone.EXTRA and (old.get("query_inventory", False) if old else True)
             info.update({name: value for name, value in fields.items() if name not in {"position", "equip_target", "target_locations"}})
             info["online_query_fields"] = tuple(sorted(set(fields).intersection(dynamic_names)))
             info["used_effect_mask"] = old.get("used_effect_mask", 0) if same else 0
@@ -1568,8 +1644,11 @@ class DuelState:
             if fields.get("equip_target"):
                 info["equip_target"] = LocationInfo.decode(fields["equip_target"])[:3]
                 info["is_equipped"] = True
+            if "equip_target" in fields:
+                info["equip_target_location_raw"] = fields["equip_target"]
             if "target_locations" in fields:
                 info["targets"] = [LocationInfo.decode(raw)[:3] for raw in fields["target_locations"]]
+                info["target_location_values"] = list(fields["target_locations"])
             updated[index] = info
         self.field_map[actor][zone] = updated
 
@@ -1686,9 +1765,14 @@ class DuelState:
                     entities[-1].top_overlay_code = top_overlay_code
                     entities[-1].query_known_fields = info.get('online_query_fields')
                     entities[-1].query_sequence = info.get('query_sequence')
-                    for name in ('current_code', 'original_owner', 'current_rank', 'link_rating', 'is_disabled', 'is_forbidden', 'properly_summoned', 'counter_items', 'reason'):
+                    entities[-1].query_invalidated = bool(info.get('query_invalidated'))
+                    entities[-1].query_inventory = bool(info.get('query_inventory'))
+                    for name in ('current_code', 'original_owner', 'current_rank', 'link_rating', 'status_mask', 'is_equip_source', 'is_disabled', 'is_forbidden', 'properly_summoned', 'counter_items', 'reason'):
                         if name in info:
                             setattr(entities[-1], name, info[name])
+                    for name, key in (('reason_card_location', 'reason_card'), ('equip_target_location', 'equip_target_location_raw'), ('target_locations', 'target_location_values')):
+                        if key in info:
+                            setattr(entities[-1], name, info[key] if isinstance(info[key], int) else list(info[key]))
                     for name in ('lscale', 'rscale', 'link_marker', 'base_atk', 'base_def'):
                         if name in info.get('online_query_fields', ()):
                             setattr(entities[-1], name, info[name])
@@ -1714,6 +1798,18 @@ class DuelState:
                 for location in relations['targeted_by']
                 if location in loc_to_idx_map
             ]
+
+        # 由正向事实重建反向关系，避免单卡刷新后仍继承已撤销的装备或目标
+        for entity in entities:
+            entity.equipped_by_entity_indices = []
+            entity.targeted_by_entity_indices = []
+        for source_index, entity in enumerate(entities):
+            if entity.equip_target_entity_idx >= 0:
+                entities[entity.equip_target_entity_idx].equipped_by_entity_indices.append(source_index)
+            for target_index in entity.target_entity_indices:
+                entities[target_index].targeted_by_entity_indices.append(source_index)
+        for entity in entities:
+            entity.is_equipped = bool(entity.equip_target_entity_idx >= 0 or entity.equipped_by_entity_indices or getattr(entity, "is_equip_source", False))
 
         # --- [核心步骤] 匹配 Action 指针 ---
         # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
@@ -1778,6 +1874,15 @@ class DuelState:
         snap.global_data.starting_player = context.starting_player
         snap.global_data.p0_turn_count, snap.global_data.p1_turn_count = context.turn_counts
         snap.global_data.disabled_field_mask = context.disabled_field_mask
+        snap.global_data.decision_player = self.active_player
+        for player in (0, 1):
+            initial_main, initial_extra = self._initial_decks[player]
+            setattr(snap, f"p{player}_initial_deck_codes", list(initial_main or ()))
+            setattr(snap, f"p{player}_initial_extra_codes", list(initial_extra or ()))
+        snap.initial_deck_known = {player: all(item is not None for item in self._initial_decks[player]) for player in (0, 1)}
+        snap.observed_transitions = self.response_history.snapshot()
+        snap.observed_history_coverage = self.response_history.coverage()
+        snap.action_prompt_type = self._action_prompt_type if final_actions else None
         return snap
     
     def sync_active_field(self, env):

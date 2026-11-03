@@ -88,11 +88,12 @@ galatea_link:
 读取接口
 
 - `GET /api/v1/health` 无需鉴权且不会加载模型
-- `GET /api/v1/capabilities` 返回 API、V3、YGOPro 和推理后端能力
+- `GET /api/v1/capabilities` 返回 API、稳定 V3、预览 V4、YGOPro 和推理后端能力
 - `GET /api/v1/status` 返回脱敏会话状态
 - `GET /api/v1/controls` 返回宏观控制和 revision
 - `GET /api/v1/configuration` 返回脱敏的 YGOPro、Agent、LLM 和服务配置
 - `GET /api/v1/models` 返回模型仓库、当前选择和本地 GKG 列表
+- `GET /api/v1/models/diagnostics/v4` 返回缓存的 V4 输入覆盖报告，不加载模型或执行推理
 - `GET /api/v1/assets` 返回当前模型的 CDB、脚本、语义资产和 MSG 142 兜底池状态
 - `GET /api/v1/decks` 返回 Link 本地卡组名称、卡片内容和来源
 - `GET /api/v1/observation` 返回最近一次 LLM 可见观察
@@ -138,6 +139,8 @@ galatea_link:
 ## WebUI 与 Flutter 选择
 
 当前 Link UI 采用服务端自带的浏览器界面，不要求 Node、Flutter 或额外安装，且与 AstrBot 使用完全相同的 API。这个界面目前覆盖启动停止、状态、介入模式、Core 策略与温度、模型导入和选择、本地 YDK 导入与单卡调整、运行资产更新、MSG 142 兜底池、自主调整开关、游戏聊天、LLM 观察和实时事件
+
+3.3.2 在模型仓库增加“V4 在线接入检查”。用 V3 或仅 LLM 模式对局后即可导出当前或最近一局的结构报告；停止会话仍可导出，重启服务后清除。报告只含覆盖计数和字段缺口，不含卡密、卡组、响应字节或密钥，也不会自动发送给 LLM。诊断映射不开放 V4 在线推理，详细边界见 [V4 接入说明](V4_ADAPTER.md)
 
 策略、模型选择和配置中心不要求游戏会话已经启动。Link 会把这些非敏感覆盖写入忽略版本控制的 `link_state.json`，不会把 LLM 密钥、服务器密码或服务令牌写入该文件。运行中的配置和模型选择在下一次会话启动时生效；TCP 测试只连接并立即关闭，不加入房间
 

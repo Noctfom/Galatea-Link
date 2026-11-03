@@ -18,6 +18,8 @@ class GalateaEncoder:
     def encode(self, snapshot, player_id, *, output_format="numpy"):
         if not isinstance(snapshot, GameSnapshot):
             raise ValueError("V4 在线观测合同尚未验收，不能将旧在线快照补零编码")
+        if hasattr(snapshot, "_link_v4_projection"):
+            raise ValueError("V4 在线诊断投影尚未验收，不能作为正常推理输入")
         with use_assets(self.assets):
             arrays = self.encoder.encode(snapshot, player_id)
         arrays = {key: np.ascontiguousarray(value) for key, value in arrays.items()}
@@ -27,3 +29,21 @@ class GalateaEncoder:
             raise ValueError("V4 编码输出必须是 numpy 或 torch")
         import torch
         return {key: torch.from_numpy(value) for key, value in arrays.items()}
+
+    # 仅对照诊断投影与参考快照，结果不包含输入数值且不执行网络推理
+    def audit_projection(self, projection, reference, player_id, *, sample_limit=8):
+        from .online_adapter import compare_encoded_observations
+        if projection.snapshot is None or not hasattr(projection.snapshot, "_link_v4_projection"):
+            raise ValueError("缺少已开始对局的诊断投影")
+        if projection.report["perspective"] != player_id:
+            raise ValueError("诊断视角不一致")
+        if "fixed_capacity_exceeded" in projection.report["blocking_reasons"]:
+            raise ValueError("诊断投影超出 V4 固定容量")
+        if not isinstance(reference, GameSnapshot) or hasattr(reference, "_link_v4_projection"):
+            raise ValueError("参考必须是独立的完整 V4 快照")
+        with use_assets(self.assets):
+            expected = self.encoder.encode(reference, player_id)
+            actual = self.encoder.encode(projection.snapshot, player_id)
+        report = compare_encoded_observations(expected, actual, sample_limit=sample_limit)
+        report["source_readiness"] = projection.report
+        return report

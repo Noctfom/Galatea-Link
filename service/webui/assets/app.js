@@ -463,6 +463,7 @@ function updateRuntimeAvailability() {
   query("#chatInput").disabled = !running;
   query("#sendChatButton").disabled = !running || appState.busy.has("chat");
   query("#refreshModelsButton").disabled = !authenticated;
+  query("#downloadV4DiagnosticsButton").disabled = !authenticated;
   query("#refreshDecksButton").disabled = !authenticated;
   query("#ydkFileInput").disabled = !authenticated;
   query("#overwriteDeckInput").disabled = !authenticated;
@@ -501,6 +502,12 @@ function renderStatus(status) {
   setText("#dshMetricNote", activeDsh ? `${activeDsh.instance_name} · ${activeDsh.age_seconds} 秒前` : "等待插件心跳");
   query("#rawStatusData").textContent = formatJson(status);
   const runtime = status?.runtime;
+  const v4Diagnostics = status?.v4_observation_diagnostics || runtime?.core_model?.observation_diagnostics;
+  setText("#v4DiagnosticsSummary", !v4Diagnostics?.available
+    ? "等待对局数据，V3 或仅 LLM 对局也可生成诊断"
+    : v4Diagnostics.blocking_reasons?.includes("mapping_failed")
+      ? "本局诊断尚未完成，可导出报告排查"
+      : `${v4Diagnostics.scope === "last_duel" ? "上一局" : "本局"}已映射 ${v4Diagnostics.mapped_groups} 类输入，${v4Diagnostics.missing_card_count} 张可见卡片仍缺实时属性`);
   const astrbot = status?.integrations?.astrbot || {};
   const activeAstrbot = (astrbot.clients || []).find((item) => item.connected);
   setText("#astrbotMetric", astrbot.connected ? "已连接" : "未连接");
@@ -1643,6 +1650,16 @@ function downloadText(filename, text) {
   window.setTimeout(URL.revokeObjectURL.bind(URL, url), 1000);
 }
 
+// 导出缓存的匿名 V4 覆盖报告，不上传数据或读取模型权重
+async function downloadV4Diagnostics() {
+  const report = await api("/models/diagnostics/v4");
+  if (!report.available) {
+    throw new Error("尚无对局诊断数据，请开始一局后再导出");
+  }
+  downloadText("galatea-v4-diagnostics.json", formatJson(report));
+  notify("已导出 V4 接入诊断");
+}
+
 // 导出当前 LLM 观察为 JSON 文件
 function downloadObservation() {
   if (!appState.observation) {
@@ -2551,6 +2568,7 @@ function bindInterfaceEvents() {
   query("#chatSettingsForm").addEventListener("submit", handleChatSettingsSubmit);
   query("#refreshChatButton").addEventListener("click", runAction.bind(null, refreshChatHistory, {}));
   query("#refreshModelsButton").addEventListener("click", runAction.bind(null, refreshModels, {}));
+  query("#downloadV4DiagnosticsButton").addEventListener("click", runAction.bind(null, downloadV4Diagnostics, {}));
   query("#refreshDecksButton").addEventListener("click", runAction.bind(null, refreshDecks, {}));
   query("#ydkFileInput").addEventListener("change", updateYdkFileLabel);
   query("#localDeckImportForm").addEventListener("submit", handleLocalDeckImport);

@@ -240,6 +240,34 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(authorized.status, 200)
 
+    # 匿名诊断接口沿用鉴权，空闲读取不会初始化模型或游戏会话
+    async def test_v4_diagnostics_are_authenticated_and_lazy(self):
+        unauthorized = await self.client.get("/api/v1/models/diagnostics/v4")
+        self.assertEqual(unauthorized.status, 401)
+        response = await self.client.get("/api/v1/models/diagnostics/v4", headers={"Authorization": "Bearer test-token"})
+        report = (await response.json())["data"]
+        self.assertEqual(response.status, 200)
+        self.assertFalse(report["available"])
+        self.assertFalse(report["online_inference_ready"])
+        self.assertEqual(self.created, [])
+
+    # 停止会话后仍能导出最近报告，读取副本不会篡改缓存
+    async def test_v4_diagnostics_survive_session_stop(self):
+        await self.manager.start()
+        report = {"schema_version": "galatea.v4_observation_diagnostics.v1", "available": True,
+            "online_inference_ready": False, "diagnostic_only": True, "scope": "last_duel",
+            "groups": {"cards": {"missing_card_count": 2}}, "blocking_reasons": ["cards_source_incomplete"]}
+        self.manager._link.runtime.get_v4_diagnostics = lambda: report
+        self.assertEqual(self.manager.get_v4_diagnostics()["groups"]["cards"]["missing_card_count"], 2)
+        await self.manager.stop()
+        exported = self.manager.get_v4_diagnostics()
+        exported["groups"].clear()
+        self.assertIn("cards", self.manager.get_v4_diagnostics()["groups"])
+        summary = self.manager.get_status()["v4_observation_diagnostics"]
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["scope"], "last_duel")
+        self.assertEqual(summary["missing_card_count"], 2)
+
     # 验证控制台页面和零构建静态资源可以直接由 Link 服务提供
     async def test_webui_static_assets_are_served(self):
         page = await self.client.get("/")

@@ -42,6 +42,10 @@ asyncio.run(main())
 
 `link.runtime.get_latest_observation()` 返回标准玩家可见观察的独立副本。事件中的 `observation_id` 可用于判断是否已经读取到最新版本
 
+`link.runtime.get_v4_diagnostics()` 返回当前或最近一局的 V4 输入覆盖报告副本。读取只访问缓存，不结算响应历史、不加载模型、不执行推理。`get_status().core_model.observation_diagnostics` 只含摘要；HTTP 服务在 `GET /api/v1/status` 顶层的 `v4_observation_diagnostics` 保留相同摘要，即使游戏会话已经停止
+
+详细报告通过鉴权接口 `GET /api/v1/models/diagnostics/v4` 获取，响应的 `data` 使用 `galatea.v4_observation_diagnostics.v1`。报告只含字段覆盖、坐标、计数和阻塞原因，不含卡密、卡组、响应字节或密钥，且不自动附加到 LLM 上下文。`online_inference_ready=false` 仍然保留，详见 [V4 诊断与历史边界](V4_ADAPTER.md)
+
 ## 动态介入控制
 
 所有前端、AstrBot 和其他外部调用方应优先使用统一控制面

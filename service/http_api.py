@@ -199,7 +199,7 @@ async def handle_capabilities(request: web.Request) -> web.Response:
             "link_version": __version__,
             "stable_model_protocols": [3],
             "preview_model_protocols": [4],
-            "model_protocol_readiness": {"4": {"asset_import": True, "offline_inference": True, "online_inference": False, "reason": "awaiting_link_v4_observation_validation"}},
+            "model_protocol_readiness": {"4": {"asset_import": True, "offline_inference": True, "online_inference": False, "reason": "awaiting_link_v4_observation_validation", "observation_diagnostics": True}},
             "game_protocol_profile": "ygopro",
             "game_protocol_family": "ygopro",
             "known_compatible_clients": ["mdpro3"],
@@ -209,6 +209,7 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "selection": True,
                 "gkg_import": True,
                 "gkg_package_format_versions": [2, 4],
+                "v4_observation_diagnostics_endpoint": "/api/v1/models/diagnostics/v4",
             },
             "asset_management": {
                 "card_database_sync": True,
@@ -418,12 +419,17 @@ async def handle_llm_test(request: web.Request) -> web.Response:
     return _json_response(result)
 
 
-# 返回模型协议 V3 仓库、当前选择和本地 GKG 包
+# 返回模型协议仓库、当前选择和本地 GKG 包
 async def handle_models_get(request: web.Request) -> web.Response:
     catalog = await asyncio.to_thread(
         request.app[MANAGER_KEY].get_model_catalog,
     )
     return _json_response(catalog)
+
+
+# 返回不包含卡密和响应字节的 V4 映射诊断
+async def handle_v4_diagnostics(request: web.Request) -> web.Response:
+    return _json_response(request.app[MANAGER_KEY].get_v4_diagnostics())
 
 
 # 返回只包含 Link 本地卡组的公开目录
@@ -859,6 +865,7 @@ def create_http_app(
             web.post("/api/v1/configuration/server/test", handle_server_test),
             web.post("/api/v1/configuration/llm/test", handle_llm_test),
             web.get("/api/v1/models", handle_models_get),
+            web.get("/api/v1/models/diagnostics/v4", handle_v4_diagnostics),
             web.get("/api/v1/decks", handle_decks_get),
             web.post("/api/v1/decks/local", handle_local_deck_import),
             web.patch("/api/v1/decks/local", handle_local_deck_patch),

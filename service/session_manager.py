@@ -65,6 +65,7 @@ class LinkSessionManager:
         self._session_deck_scope_id: str | None = None
         self._astrbot_clients: dict[str, dict[str, Any]] = {}
         self._dsh_integration = ExternalIntegrationRegistry("dsh", self._events)
+        self._last_v4_diagnostics = None
 
     # 返回当前是否持有仍在执行的游戏任务
     @property
@@ -77,6 +78,7 @@ class LinkSessionManager:
 
     # 返回不包含密码和密钥的服务会话状态
     def get_status(self) -> dict[str, Any]:
+        from core.runtime_api import summarize_v4_diagnostics
         runtime_status = None
         if self._link is not None:
             try:
@@ -92,6 +94,7 @@ class LinkSessionManager:
             "last_event_type": self._last_event_type,
             "last_error": self._last_error,
             "configured_model": self._settings.get_model_selection(),
+            "v4_observation_diagnostics": summarize_v4_diagnostics(self.get_v4_diagnostics()),
             "integrations": {
                 "astrbot": self.get_astrbot_integration_status(),
                 "dsh": self._dsh_integration.status(),
@@ -863,6 +866,18 @@ class LinkSessionManager:
     def get_model_package_directory(self) -> Path:
         return self._models.package_root
 
+    # 在运行或停止后读取最近匿名诊断，接口不触发模型加载或前向运算
+    def get_v4_diagnostics(self):
+        from copy import deepcopy
+        from core.runtime_api import empty_v4_diagnostics
+        runtime = getattr(self._link, "runtime", None)
+        getter = getattr(runtime, "get_v4_diagnostics", None)
+        if callable(getter):
+            report = getter()
+            if report.get("available"):
+                self._last_v4_diagnostics = deepcopy(report)
+        return deepcopy(self._last_v4_diagnostics or empty_v4_diagnostics())
+
     # 读取最近一次提供给 LLM 的可见信息快照
     def get_latest_observation(self) -> dict[str, Any] | None:
         return self._require_runtime().get_latest_observation()
@@ -997,6 +1012,9 @@ class LinkSessionManager:
 
     # 清空单个游戏会话引用但保留诊断信息
     def _clear_session(self) -> None:
+        self.get_v4_diagnostics()
+        if self._last_v4_diagnostics:
+            self._last_v4_diagnostics["scope"] = "last_duel"
         self._link = None
         self._link_subscription = None
         self._run_task = None

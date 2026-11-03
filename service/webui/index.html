@@ -469,12 +469,18 @@
                 <span id="modelSelectionRevision" class="tag">revision —</span>
               </div>
               <div id="selectedModelSummary" class="selected-model-summary empty-state">正在读取模型选择</div>
+              <div class="configuration-note">
+                <strong>V4 在线接入检查</strong>
+                <p id="v4DiagnosticsSummary">等待对局数据，V3 或仅 LLM 对局也可生成诊断</p>
+                <button id="downloadV4DiagnosticsButton" class="secondary-button" type="button">导出诊断</button>
+                <small>报告只包含输入覆盖与来源缺口，不含卡组内容或响应字节</small>
+              </div>
               <div id="modelRestartNotice" class="inline-alert is-warning" hidden>当前会话继续使用已加载模型，新选择将在重启 Link 后生效</div>
             </article>
 
             <form id="gkgImportForm" class="panel import-panel">
               <div class="panel-heading">
-                <div><p class="section-kicker">部署包格式 2</p><h2>导入 GKG</h2></div>
+                <div><p class="section-kicker">部署包格式 2 / 4</p><h2>导入 GKG</h2></div>
               </div>
               <label id="gkgDropzone" class="file-dropzone" for="gkgFileInput">
                 <input id="gkgFileInput" type="file" accept=".gkg" required>

@@ -275,7 +275,7 @@ class YgoNetClient:
 
         async with self._write_lock:
             if not self.writer or not self.is_connected:
-                return
+                return False
             if self.trace_packets:
                 _console_print(
                     f"[协议发送] CTOS type=0x{msg_type:02X} payload={len(payload)}"
@@ -284,7 +284,8 @@ class YgoNetClient:
             try:
                 await self.writer.drain() # 👑 真正的同步网络强冲刷
             except Exception:
-                pass
+                return False
+            return True
 
     async def _receive_loop(self):
         try:
@@ -426,4 +427,4 @@ class YgoNetClient:
             payload = struct.pack('<i', 0)
 
         _console_print(f"📤 [网络发包] 回复 CTOS_RESPONSE (0x01) -> Hex流: {payload.hex().upper()}")
-        await self.send_packet(CTOS_RESPONSE, payload)
+        return await self.send_packet(CTOS_RESPONSE, payload)

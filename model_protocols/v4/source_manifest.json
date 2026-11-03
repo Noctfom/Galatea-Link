@@ -6,9 +6,10 @@
   "maintenance_sources": [
     {
       "commit": "f83f700e1624dda70531d6bdb51b5fd40e3d4916",
-      "purpose": "语义兼容证据只读校验及运行时坐标系元数据，未改变模型输入结构",
+      "purpose": "语义兼容证据及坐标系元数据，补齐事件目标位置与身份的等长填充，未改变模型输入结构",
       "source_sha256_bytes": {
-        "semantic_lookup.py": "99af21f4c80994ec4b7b2633ccdcfade1121bdc510091889cdd3fee8fba87551"
+        "semantic_lookup.py": "99af21f4c80994ec4b7b2633ccdcfade1121bdc510091889cdd3fee8fba87551",
+        "event_history.py": "eae58371d1fdede478768edcd13555b1e19386c358e72d0a894ef44e3057b98f"
       }
     }
   ],

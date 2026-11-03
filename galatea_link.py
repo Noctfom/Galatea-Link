@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import functools
+import struct
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -597,6 +598,10 @@ class GalateaLink:
                     
                     # === 修复 1：完美处理 RETRY 死锁 ===
                     if ocg_type == 1:
+                        self.gamestate.update(ocg_type, ocg_payload)
+                        previous_actions = getattr(self, "last_prompt_actions", None)
+                        if previous_actions:
+                            self.gamestate.current_valid_actions = copy.deepcopy(previous_actions)
                         _console_print(f"⚠️ [引擎警告] 操作不合法，触发重试 (MSG_RETRY)")
                         if self.last_decision is not None:
                             self.ignore_actions_blacklist.append(self.last_decision)
@@ -673,6 +678,7 @@ class GalateaLink:
 
     # 创建独立快照并提交后台决策任务
     async def _schedule_decision(self, msg_type, raw_msg, snapshot=None):
+        self.last_prompt_actions = copy.deepcopy(getattr(self.gamestate, "current_valid_actions", ()))
         snap = snapshot or self.gamestate.get_snapshot()
         if snapshot is None:
             self._capture_llm_observation(msg_type, snap)
@@ -876,6 +882,7 @@ class GalateaLink:
             ),
         }
         self.latest_observation = observation
+        self._update_v4_diagnostics(snapshot, event_type)
         self._publish_event(
             "observation.updated",
             {
@@ -886,6 +893,22 @@ class GalateaLink:
                 "legal_action_count": len(observation.get("legal_actions", [])),
             },
         )
+
+    # 缓存匿名映射报告，诊断失败不会阻塞决策或调用模型前向
+    def _update_v4_diagnostics(self, snapshot, event_type=None):
+        if not getattr(snapshot, "online_coverage", {}).get("started"):
+            return
+        try:
+            from model_protocols.v4.online_adapter import V4OnlineProjector
+            if getattr(self, "_v4_projector", None) is None:
+                self._v4_projector = V4OnlineProjector()
+            projection = self._v4_projector.project(snapshot, self._perspective_player_id(), event_type=event_type)
+            self.last_v4_diagnostics = projection.report
+            self.last_v4_diagnostics["scope"] = "current_duel"
+        except Exception as error:
+            self.last_v4_diagnostics = {"schema_version": "galatea.v4_observation_diagnostics.v1",
+                "available": True, "diagnostic_only": True, "online_inference_ready": False,
+                "groups": {}, "blocking_reasons": ["mapping_failed"], "error_type": type(error).__name__}
 
     # 返回最新观察副本供后续 LLM 和 AstrBot 接口读取
     def get_latest_llm_observation(self):
@@ -931,6 +954,9 @@ class GalateaLink:
             self.gamestate.p0_extra = []
             self.gamestate.p1_deck = list(self.deck.main)
             self.gamestate.p1_extra = list(self.deck.extra)
+        own_deck_setter = getattr(self.gamestate, "set_own_deck", None)
+        if callable(own_deck_setter):
+            own_deck_setter(player_id, self.deck.main, self.deck.extra)
         self._publish_event(
             "duel.player.assigned",
             {
@@ -1085,6 +1111,12 @@ class GalateaLink:
         if not getattr(self, "duel_active", False):
             return
         self.duel_active = False
+        tracker = getattr(self.gamestate, "response_history", None)
+        if tracker is not None:
+            tracker.abandon("connection_ended_before_boundary")
+            self._update_v4_diagnostics(self.gamestate.get_snapshot())
+            if getattr(self, "last_v4_diagnostics", None):
+                self.last_v4_diagnostics["scope"] = "last_duel"
         result = copy.deepcopy(getattr(self, "_pending_duel_result", None))
         if result is None:
             reason_names = {
@@ -1117,6 +1149,8 @@ class GalateaLink:
     async def _reset_duel_state(self):
         await self.decision_coordinator.cancel_active()
         self.gamestate.reset()
+        if getattr(self, "_v4_projector", None) is not None:
+            self._v4_projector.reset()
         self.ai_core_player_id = None
         self.time_player = None
         self.time_left = {0: None, 1: None}
@@ -1128,6 +1162,7 @@ class GalateaLink:
         self.last_decision = None
         self.last_prompt_type = None
         self.last_prompt_msg = None
+        self.last_prompt_actions = None
         self.latest_observation = None
         self.ignore_choice_ids_blacklist = []
         self.last_decision_choice_id = None
@@ -1339,7 +1374,29 @@ class GalateaLink:
         ):
             chat_message = outcome.chat_message
         self.latest_chat_suggestion = chat_message
-        await self.client.send_decision(outcome.response)
+        tracker = getattr(getattr(self, "gamestate", None), "response_history", None)
+        token = None
+        empty_chain = request.msg_type == 16 and len(request.raw_msg) == 12 and request.raw_msg[2] == 0
+        if tracker is not None and tracker.perspective in (0, 1) and not empty_chain:
+            action, choice_id = self._match_submitted_action(request, outcome)
+            token = tracker.prepare(request_id=request.request_id, actor=tracker.perspective,
+                prompt_type=request.msg_type, turn=request.snapshot.global_data.turn_count,
+                phase=request.snapshot.global_data.phase_id, action=action, choice_id=choice_id,
+                digest=self.gamestate.history_digest())
+        try:
+            sent = await self.client.send_decision(outcome.response)
+            if sent is False:
+                raise ConnectionError("响应未能写入游戏连接")
+            if tracker is not None and token is not None:
+                if sent is True:
+                    if not tracker.confirm(token):
+                        return
+                else:
+                    tracker.abort(token, "transport_confirmation_unavailable")
+        except BaseException:
+            if tracker is not None and token is not None:
+                tracker.abort(token)
+            raise
         self._publish_event(
             "decision.committed",
             {
@@ -1376,6 +1433,21 @@ class GalateaLink:
                             "error": str(error),
                         },
                     )
+
+    # 用实际响应反查合法候选，无法唯一匹配时保留未映射事实而不猜动作
+    def _match_submitted_action(self, request, outcome):
+        from core.response_history import response_bytes
+        try:
+            expected = response_bytes(outcome.response)
+            choices = []
+            for index, action in enumerate(request.snapshot.valid_actions):
+                packed = self.ai.pack_choice_from_snapshot(request.snapshot, index, request.msg_type)
+                if response_bytes(packed) == expected:
+                    choices.append(index)
+            chosen = outcome.choice_id if outcome.choice_id in choices else choices[0] if len(choices) == 1 else None
+            return (request.snapshot.valid_actions[chosen], chosen) if chosen is not None else (None, None)
+        except (AttributeError, TypeError, ValueError, OverflowError, struct.error):
+            return None, None
 
     # 推进旧自主覆盖并安全应用本次 LLM 的新宏观调整
     async def _apply_decision_controls(

@@ -364,6 +364,8 @@ class LlmObservationBuilder:
         known_fields = getattr(entity, "query_known_fields", None)
         if known_fields is not None:
             result["dynamic_state_source"] = "server_query"
+            if getattr(entity, "query_invalidated", False):
+                result["dynamic_state_source"] = "query_invalidated"
             result["query_sequence"] = getattr(entity, "query_sequence", None)
             result["known_dynamic_fields"] = list(known_fields)
             for output_name, query_name in {
@@ -382,7 +384,7 @@ class LlmObservationBuilder:
         if code:
             card = self._register_card(code, catalog)
             result["name"] = card["name"]
-        if entity.overlay_codes:
+        if entity.overlay_codes and (known_fields is None or "overlay_codes" in known_fields):
             result["overlay_cards"] = self._build_overlay_cards(
                 entity.overlay_codes,
                 catalog,

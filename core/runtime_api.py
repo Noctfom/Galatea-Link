@@ -14,6 +14,21 @@ from core.link_events import LinkEvent, LinkEventBus, LinkEventSubscription
 VALID_INTERVENTION_MODES = {"core_only", "llm_only", "llm_review", "hybrid"}
 
 
+# 尚无对局数据时仍返回稳定且不依赖模型加载的诊断结构
+def empty_v4_diagnostics():
+    return {"schema_version": "galatea.v4_observation_diagnostics.v1", "available": False,
+        "diagnostic_only": True, "online_inference_ready": False, "scope": "none",
+        "groups": {}, "blocking_reasons": ["start_missing"]}
+
+
+# 状态轮询只返回少量覆盖计数，详细缺口通过专用接口读取
+def summarize_v4_diagnostics(report):
+    return {"available": report["available"], "diagnostic_only": True,
+        "mapped_groups": sum(bool(group.get("mapped")) for group in report["groups"].values()),
+        "missing_card_count": report["groups"].get("cards", {}).get("missing_card_count", 0),
+        "blocking_reasons": list(report["blocking_reasons"]), "scope": report.get("scope", "none")}
+
+
 class GalateaRuntimeApi:
     # 初始化与具体社交平台解耦的运行时接口
     def __init__(self, link: Any, event_bus: LinkEventBus):
@@ -101,6 +116,7 @@ class GalateaRuntimeApi:
                 "left": copy.deepcopy(getattr(self._link, "time_left", {})),
             },
             "core_model": {
+                "observation_diagnostics": self._v4_diagnostic_summary(),
                 "loaded": bool(getattr(self._link, "core_model_loaded", False)),
                 "online_block_reason": (model_metadata or {}).get("online_block_reason"),
                 "available": bool(getattr(ai, "model_available", False)),
@@ -178,6 +194,15 @@ class GalateaRuntimeApi:
                 ),
             },
         }
+
+    # 返回缓存的匿名 V4 映射诊断，读取不会结算历史或执行编码
+    def get_v4_diagnostics(self):
+        return copy.deepcopy(getattr(self._link, "last_v4_diagnostics", None) or empty_v4_diagnostics())
+
+    # 状态接口只携带小摘要，详细字段缺口通过专用接口读取
+    def _v4_diagnostic_summary(self):
+        report = getattr(self._link, "last_v4_diagnostics", None) or empty_v4_diagnostics()
+        return summarize_v4_diagnostics(report)
 
     # 返回当前标准可见观察的独立副本
     def get_latest_observation(self) -> dict[str, Any] | None:

@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.3.1-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.3.2-6b8f71)
 
 </div>
 
@@ -14,7 +14,7 @@ Galatea Link 是一个独立的游戏王智能体运行与接入层。它通过 
 
 Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://github.com/Noctfom/Galatea-Link-mobile)！也可以[点击这里](galatea.noctfom.top)直接前往软件下载页！
 
-> 在线模型仍以 V3 为稳定接入路径。V4 资产与离线推理已接通，在线决策等待 Link 自身的历史、状态和编码对照完成，详见 [V4 接入说明](docs/V4_ADAPTER.md)。请先在测试房间验证卡组、协议版本和决策时限
+> 在线模型仍以 V3 为稳定接入路径。V4 资产与离线推理已接通，在线状态映射和受控编码对照可供诊断，完整历史与真实服务器覆盖仍待验收，详见 [V4 接入说明](docs/V4_ADAPTER.md)。请先在测试房间验证卡组、协议版本和决策时限
 
 ## 已实现能力
 
@@ -27,6 +27,7 @@ Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://gith
 - AstrBot 作为主智能体远程决策、游戏内聊天、查卡、卡组导入及会话隔离的临时卡组编辑
 - 玩家可见观察、远程合法动作提交、运行时控制、WebSocket 事件流和低开销赛后摘要
 - Link 独立处理服务器卡片与玩家提示、错过发动时点和公开卡组位置，供本地及远程 LLM 使用
+- WebUI 可导出不含卡密、卡组或响应字节的 V4 输入覆盖报告，V3 与仅 LLM 对局也能采集
 - 浅色/深色 WebUI，可配置连接、模型、LLM、决策策略、运行资产和游戏聊天
 - Link 本地卡组仓库，可导入、查看、选择、单卡调整和安全删除 YDK
 - 卡库、Lua 脚本、语义资产同步，以及 MSG 142 宣言兜底池管理

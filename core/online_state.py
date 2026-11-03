@@ -47,6 +47,7 @@ class OnlineStateProjection:
         self.disabled_field_mask = 0
         self.public_message_counts = {120: 0, 160: 0, 165: 0}
         self.last_known_draws = ()
+        self.invalidated_locations = ()
 
     # 严格读取 Start 的座位生命值及区域数量
     def start(self, payload):
@@ -148,11 +149,12 @@ class OnlineStateProjection:
         return {"visibility": "player_view", "query_mode": self.query_mode or "unconfirmed",
                 "query_cache_contract_confirmed": self.query_mode is not None,
                 "perspective": self.perspective, "started": self.started, "sequence": self.sequence,
+                "public_count_baseline_valid": self.started and all((actor, zone) in self.counts for actor in (0, 1) for zone in (1, 64)),
                 "v4_observation_complete": False, "online_v4_inference_ready": False,
                 "public_context_processing": "link_online",
                 "public_messages_received": dict(self.public_message_counts),
                 "tracked_hint_lifecycle_consistent": self.public_context.complete,
-                "limitations": ["online_transition_history_not_implemented", "full_server_hint_coverage_unverified", "dynamic_attribute_coverage_unverified"]}
+                "limitations": ["complete_transition_history_unavailable", "full_server_hint_coverage_unverified", "dynamic_attribute_coverage_unverified"]}
 
     # 按真实接收者绑定提示与记牌可见性，不将单方消息升级为双方事实
     def public_snapshot(self):
@@ -160,6 +162,37 @@ class OnlineStateProjection:
         scope = 1 << self.perspective if self.perspective in (0, 1) else 0
         return (tuple(replace(hint, visibility=hint.visibility & scope) for hint in hints),
             tuple(replace(card, visibility=card.visibility & scope) for card in cards), flags)
+
+    # 由明确的位置变化决定缓存失效范围，连续区域同时失效其槽位编号
+    def _event_invalidations(self, kind, payload):
+        if kind in (35, 162):
+            return tuple((actor, zone, None) for actor in (0, 1) for zone in ZONES)
+        raw_locations = []
+        if kind == 50:
+            first, second = struct.unpack_from("<II", payload, 4)
+            raw_locations.extend((first, second))
+        elif kind == 55:
+            _, first, _, second = struct.unpack("<IIII", payload)
+            raw_locations.extend((first, second))
+        elif kind == 53:
+            actor, zone, sequence = payload[4:7]
+            raw_locations.append(LocationInfo.encode(actor, zone, sequence, 0))
+        elif kind in (32, 33, 39):
+            return ((payload[0], {32: 1, 33: 2, 39: 64}[kind], None),)
+        elif kind == 36:
+            return tuple((actor, payload[0], None) for actor in (0, 1))
+        locations = []
+        for raw in raw_locations:
+            actor, zone, sequence, _ = LocationInfo.decode(raw)
+            zone &= ~Zone.OVERLAY
+            if actor in (0, 1) and zone in ZONES:
+                locations.append((actor, zone, sequence if zone in (4, 8) else None))
+        return tuple(locations)
+
+    # 判断物理位置是否已受本次实例变化影响
+    def location_invalidated(self, location):
+        return any(location[:2] == item[:2] and (item[2] is None or location[2] == item[2])
+            for item in self.invalidated_locations)
 
     # 解析 Link 实际收到的公开提示与位置消息，不经过 Core 宿主过滤器
     def _observe_public_event(self, kind, payload, hand_counts):
@@ -249,6 +282,7 @@ class OnlineStateProjection:
             return
         self.last_known_draws = ()
         self._observe_public_event(kind, payload, hand_counts)
+        self.invalidated_locations = self._event_invalidations(kind, payload)
         deltas = []
         if kind == 50 and len(payload) == 16:
             for offset, delta in ((4, -1), (8, 1)):
@@ -261,6 +295,5 @@ class OnlineStateProjection:
         for key, delta in deltas:
             if key in self.counts:
                 self.counts[key] = max(0, self.counts[key] + delta)
-        if kind in (33, 36, 39, 50, 53, 55, 162):
-            self.cards.clear()
+        self.cards = {key: value for key, value in self.cards.items() if not self.location_invalidated(key)}
         self.sequence += 1
