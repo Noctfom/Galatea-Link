@@ -96,6 +96,28 @@ V4 结构诊断和本方响应区间记录不自动附加到 LLM 请求，不增
 
 ## 卡片知识范围
 
+从 3.3.5 开始，数量型提示 15／18／24／140／141 的已知共同约束放在顶层 `selection_context`，包含 `minimum`、`maximum`、`cancelable` 和 `finishable`；只有候选一致且字段存在时才提供，避免对每个选项重复发送。未知约束不补成确定值
+
+3.3.6 对复杂选择直接使用已解析的服务器提示补充共享上下文，保持以下含义：
+
+| 类型 | 上下文字段及含义 |
+| --- | --- |
+| 15 多选 | 最少／最多张数及是否可取消 |
+| 20 祭品 | `minimum_release_value` 为最低解放值，`maximum_cards` 为最多张数，二者不能当成同一种数量 |
+| 22 指示物 | `counter_type` 和 `required_counters`，完整候选逐张列出实际 `remove_count`，基础评分候选列的是 `available_counters` |
+| 23 求和 | `mode`、`target`、`mandatory_count`；精确和才提供可选张数范围，SumGreater 的 `optional_count_limits_apply=false` |
+| 21 连锁排序 | `sort_kind=chain`、排序长度和默认顺序出口，`effect_descriptions_available=false` 明确说明提示未提供效果描述 |
+| 25 卡片排序 | `sort_kind=card`、`order_length`，候选的 `selection_items` 按结果顺序列出卡片及 `order`，与发送名次向量互相对应 |
+| 26 逐项选撤 | 当前已选张数、可选数量和完成／取消标志，候选另给 `selection_operation` 及操作后的 `result_selected_count` |
+
+`selection_items` 同时提供祭品解放值、指示物分配量或素材的 `sum_options`，双值只表示允许选择的数值，不冒充引擎最终采用了哪一个。它们引用既有实体和卡片目录，不额外调用 LLM，也不重复整副卡组文本。查询刷新保留原提示的菜单类型，外层 `event` 仍准确记录当前收到的是查询消息
+
+从 3.3.8 起，排序候选提供 `sort_operation=custom`，逐项 `prompt_index` 是零起始原提示索引，`order` 是从 1 开始的展示顺序。相同实体出现多次时保留各项索引，不合并为同一个选择。Type21 的 `sort_operation=default` 交给服务器采用默认顺序，不表示取消效果；排序菜单也不证明实际连锁已经建立或结算。`default_order_available` 表示当前菜单是否提供这个出口，卡片排序仍维持原菜单
+
+只有通过实际字节约束的完整候选才可提交。求和没有取消响应，规则回退也不重发已被服务器拒绝的动作。该保护不等同于全部效果规则已经可见，搜索和候选池仍有边界，且 V4 在线推理保持关闭
+
+合法菜单的表示选项提供 `position_id`／`position_name`，种族属性宣言提供 `announcement_mask`，数字宣言提供 `announced_number`。这些值不会被误作效果描述编号查询。数字本身与回复服务器的选项编号不同，LLM 仍只返回 `choice_id`，由 Link 打包响应。Type12 的十三字节读取修正后，效果描述和效果槽使用正确编号
+
 当前请求会为场上、手牌、公开区域、连锁、近期历史和合法动作涉及的卡片提供效果文本
 
 己方初始主卡组和额外卡组会按卡密汇总为固定上下文，包含名称和投入数量。动态观察中的己方剩余卡组只需重复发送卡密和剩余数量

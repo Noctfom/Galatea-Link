@@ -489,12 +489,12 @@
 
             <form id="gkgImportForm" class="panel import-panel">
               <div class="panel-heading">
-                <div><p class="section-kicker">部署包格式 2 / 4</p><h2>导入 GKG</h2></div>
+                <div><p class="section-kicker">部署包格式 2 / 4 / 5</p><h2>导入 GKG</h2></div>
               </div>
               <label id="gkgDropzone" class="file-dropzone" for="gkgFileInput">
                 <input id="gkgFileInput" type="file" accept=".gkg" required>
                 <strong id="gkgFileLabel">选择 .gkg 部署包</strong>
-                <span>上传会采用流式暂存，验证模型身份和语义资产后再安装</span>
+                <span>模型验证后安装；格式 5 附件仅归档，预设暂不应用</span>
               </label>
               <label class="inline-check import-activate"><input id="activateImportedModel" type="checkbox" checked> 导入后自动选择最新的 ONNX 模型</label>
               <button id="importGkgButton" class="primary-button full-button" type="submit">验证并导入</button>

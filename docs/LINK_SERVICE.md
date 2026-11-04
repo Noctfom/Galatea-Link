@@ -154,6 +154,8 @@ AstrBot 插件启用自动连接后会定时调用心跳接口。Link 状态中�
 
 运行资产按当前模型的 `model_id` 放入 `model_assets/v3/<model_id>`，旧布局的 `model_assets/v3` 作为公共回退。Core 部署格式 2 允许 GKG 只包含运行资产而不包含模型，Link 会把这类纯资产包绑定到当前已选模型；尚未选定模型时才安装到公共回退目录。CDB 也允许作为 Link 扩展资产随包导入，但 Core 当前标准 GKG 不强制包含它
 
+V4 的 GKG4／5 资产写入 `model_assets/v4/<model_id>`。3.3.7 支持 GKG5 附件核验和独立归档，上传及本地导入接口返回归档位置，预设不应用、附件卡组不自动切换；详见 [GKG 部署包导入](GKG_IMPORT.md)
+
 “同步完整语义资产”只下载远端已经生成的 `knowledge_base.json`、代码向量和索引，并在安装前进行完整性校验，不会加载训练依赖。“本机解析 Lua 并生成向量”则复用模型协议 V3 的解析与效果槽绑定规则，支持基于当前资产增量构建、先同步远端基座后增量构建和完全本机重建。后者按需加载 `requirements-semantic.txt` 中的 Torch 与 Sentence Transformers，基础或 ONNX-only 部署无需安装
 
 AstrBot 导入卡组位于 `decks/astrbot_imports/<会话哈希>`。Link 不保存原始群号、用户号或会话 ID，查询接口只扫描调用方当前作用域；WebUI 和其他 AstrBot 会话只能看到 Link 本地卡组。卡组记录包含 `deck_ref`、显示名、主卡组、额外卡组、副卡组的卡名与数量，以及“当前 AstrBot 会话工具箱缓存”的来源标签

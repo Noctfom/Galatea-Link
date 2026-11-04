@@ -6,6 +6,7 @@ from typing import Any
 
 from game_constants import Phases, Position, Zone
 from utils.card_reader import card_db
+from core.selection_protocol import sum_options
 
 
 SCHEMA_VERSION = "galatea.llm_observation.v1"
@@ -21,6 +22,7 @@ MESSAGE_NAMES = {
     18: "select_place",
     19: "select_position",
     20: "select_tribute",
+    21: "sort_chain",
     22: "select_counter",
     23: "select_sum",
     24: "select_disabled_field",
@@ -82,6 +84,7 @@ PROMPT_ACTION_NAMES = {
     18: "select_place",
     19: "select_position",
     20: "select_tribute",
+    21: "sort_chain",
     22: "select_counter",
     23: "select_sum",
     24: "select_disabled_field",
@@ -133,18 +136,20 @@ class LlmObservationBuilder:
                 index_to_card_code[index] = card["code"]
 
         actor = self._relative_player(snapshot.global_data.to_play, player_id)
+        prompt_type = event_type if event_type in (10, 11, *PROMPT_ACTION_NAMES) else getattr(snapshot, "action_prompt_type", event_type)
         legal_actions = []
         if actor == "self":
             legal_actions = [
                 self._build_action(
                     action,
                     choice_id,
-                    event_type,
+                    prompt_type,
                     index_to_entity_id,
                     index_to_card_code,
                     catalog,
                 )
                 for choice_id, action in enumerate(snapshot.valid_actions)
+                if prompt_type != 26 or action.index <= 255
             ]
 
         opponent_id = 1 - player_id
@@ -165,6 +170,10 @@ class LlmObservationBuilder:
         own_deck = snapshot.p0_deck_codes if player_id == 0 else snapshot.p1_deck_codes
         own_extra = snapshot.p0_extra_codes if player_id == 0 else snapshot.p1_extra_codes
         public_context = self._build_public_context(snapshot, player_id, catalog)
+        selection_context = None
+        if actor == "self":
+            shared = getattr(snapshot, "selection_context", None)
+            selection_context = dict(shared) if shared else self._build_selection_context(snapshot.valid_actions, prompt_type)
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -190,6 +199,7 @@ class LlmObservationBuilder:
                 "type": event_type,
                 "name": MESSAGE_NAMES.get(event_type, f"message_{event_type}") if event_type is not None else None,
             },
+            "selection_context": selection_context,
             "turn": {
                 "number": snapshot.global_data.turn_count,
                 "phase_id": snapshot.global_data.phase_id,
@@ -284,6 +294,20 @@ class LlmObservationBuilder:
     # 将观察转换为稳定可读的 JSON 文本
     def to_json(self, observation: dict[str, Any], indent: int | None = None) -> str:
         return json.dumps(observation, ensure_ascii=False, indent=indent, sort_keys=True)
+
+    # 已验收的数量型提示共享约束，避免对每个候选重复发送相同内容
+    def _build_selection_context(self, actions, event_type):
+        if event_type not in (15, 18, 24, 140, 141) or not actions:
+            return None
+        context = {}
+        for name, field in (("minimum", "selection_min"), ("maximum", "selection_max"),
+                ("cancelable", "cancelable"), ("finishable", "finishable")):
+            if not all(hasattr(action, field) for action in actions):
+                continue
+            values = {getattr(action, field) for action in actions}
+            if len(values) == 1:
+                context[name] = values.pop()
+        return context
 
     # 构建相对玩家资源统计
     def _build_player_resources(self, global_data, absolute_player_id: int) -> dict[str, int]:
@@ -449,9 +473,51 @@ class LlmObservationBuilder:
         if macro_places:
             result["place_ids"] = list(macro_places)
 
+        values = getattr(action, "macro_target_values", None) or []
+        if event_type in (20, 21, 22, 23, 25) and values:
+            indices = macro_targets or [target_index]
+            codes = getattr(action, "macro_target_codes", None) or [getattr(action, "code", 0)]
+            items = []
+            for index, value in enumerate(values):
+                item = {}
+                if index < len(indices) and indices[index] in index_to_entity_id:
+                    item["entity_id"] = index_to_entity_id[indices[index]]
+                if index < len(codes) and self._pure_code(codes[index]):
+                    code = self._pure_code(codes[index])
+                    item["card_code"] = self._register_card(code, catalog)["code"]
+                if event_type == 23:
+                    item["sum_options"] = list(sum_options(value))
+                else:
+                    name = {20: "release_value", 21: "order", 22: "remove_count", 25: "order"}[event_type]
+                    if event_type == 22 and not getattr(action, "explicit_response", False):
+                        name = "available_counters"
+                    item[name] = value
+                prompt_indices = getattr(action, "sort_prompt_indices", ())
+                if event_type in (21, 25) and index < len(prompt_indices):
+                    item["prompt_index"] = prompt_indices[index]
+                items.append(item)
+            result["selection_items"] = items
+        if event_type in (21, 25):
+            explicit = getattr(action, "explicit_response", False) or bool(getattr(action, "decision_bytes", b""))
+            if explicit:
+                result["sort_operation"] = "default" if action.decision_bytes in (b"\xff", b"\xff" * 4) else "custom"
+            else:
+                result["prompt_index"] = action.index
+        if event_type == 26:
+            result["selection_operation"] = {4: "select", 5: "unselect", 6: "finish", 7: "cancel"}.get(action.operation_id, "unknown")
+            result["result_selected_count"] = action.selection_count
+
         desc_id = getattr(action, "desc_id", 0)
-        if desc_id:
+        if desc_id and event_type not in (18, 19, 24, 140, 141, 142, 143):
             result["description_id"] = desc_id
+        if event_type == 143:
+            result["announced_number"] = desc_id
+        elif event_type == 19:
+            result["position_id"] = action.index
+            result["position_name"] = Position.get_str(action.index)
+        elif event_type in (140, 141):
+            value = getattr(action, "decision_value", None)
+            result["announcement_mask"] = desc_id if value is None else value
 
         action_code = self._pure_code(getattr(action, "code", 0))
         if not action_code and event_type == 142:
@@ -464,7 +530,7 @@ class LlmObservationBuilder:
             "get_effect_description",
             None,
         )
-        if desc_id and get_effect_description is not None:
+        if desc_id and get_effect_description is not None and (event_type is None or event_type in (10, 11, 12, 13, 14, 16)):
             effect_description = get_effect_description(
                 desc_id,
                 action_code or target_card_code,

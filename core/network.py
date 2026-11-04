@@ -4,6 +4,7 @@ import sys
 import traceback
 
 from core.game_chat import CTOS_CHAT, encode_ctos_chat_payload
+from core.response_codec import encode_int_response
 
 # === YGOPro / MDPro 核心网络指令常量 ===
 CTOS_RESPONSE     = 0x01
@@ -420,7 +421,7 @@ class YgoNetClient:
         if decision is None:
             payload = struct.pack('<i', -1)
         elif isinstance(decision, int):
-            payload = struct.pack('<i', decision)
+            payload = encode_int_response(decision)
         elif isinstance(decision, (bytes, bytearray)):
             payload = bytes(decision)
         else:

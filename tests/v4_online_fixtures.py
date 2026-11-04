@@ -69,7 +69,7 @@ def make_state(player=0):
 
 
 # 在内存中调用 Core 原始解析器和快照方法，不导入 Core 模块或写入 Core
-def readonly_core_reference(root, state, rows, player=0):
+def readonly_core_reference(root, state, rows, player=0, *, msg_type=11, payload=None, prepare_actions=None):
     from model_protocols.v4 import data_types as d
     from model_protocols.v4 import game_constants as constants
     from model_protocols.v4.event_history import validate_transition_history
@@ -99,5 +99,7 @@ def readonly_core_reference(root, state, rows, player=0):
         info["pos"] = info["position"]
         brain.field_map[actor].setdefault(zone, {})[index] = info
     brain._parse_valid_actions = MethodType(namespace["_parse_valid_actions"], brain)
-    brain._parse_valid_actions(11, io.BytesIO(idle_prompt(player)))
+    brain._parse_valid_actions(msg_type, io.BytesIO(idle_prompt(player) if payload is None else payload))
+    if prepare_actions is not None:
+        brain.current_valid_actions = prepare_actions(brain, list(brain.current_valid_actions))
     return namespace["get_snapshot"](brain)

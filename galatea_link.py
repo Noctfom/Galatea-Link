@@ -54,6 +54,7 @@ from core.network import (
 from core.observation import LlmObservationBuilder
 from core.parser import OCGParser
 from core.rule_bot import get_rule_decision
+from core.selection_protocol import SELECTION_MSGS, validate_selection_response
 from core.runtime_api import GalateaRuntimeApi
 from core.remote_decisions import RemoteDecisionBroker
 from utils.card_reader import card_db
@@ -1413,7 +1414,17 @@ class GalateaLink:
         outcome = decision
         if not isinstance(outcome, DecisionOutcome):
             outcome = DecisionOutcome(response=decision, source="unknown")
-        self.last_decision = outcome.response
+        response = outcome.response
+        if request.msg_type in SELECTION_MSGS:
+            if request.msg_type == 23:
+                config = getattr(getattr(self, "decision_policy", None), "config", None)
+                async with asyncio.timeout(getattr(config, "core_time_budget", 5.0)):
+                    response = await asyncio.get_running_loop().run_in_executor(
+                        getattr(self, "macro_executor", None),
+                        functools.partial(validate_selection_response, request.msg_type, request.raw_msg[1:], response))
+            else:
+                response = validate_selection_response(request.msg_type, request.raw_msg[1:], response)
+        self.last_decision = response
         self.last_decision_choice_id = outcome.choice_id
         self.last_decision_source = outcome.source
         game_chat_config = getattr(self, "game_chat_config", GameChatConfig())
@@ -1442,7 +1453,7 @@ class GalateaLink:
                 phase=request.snapshot.global_data.phase_id, action=action, choice_id=choice_id,
                 digest=self.gamestate.history_digest())
         try:
-            sent = await self.client.send_decision(outcome.response)
+            sent = await self.client.send_decision(response)
             if sent is False:
                 raise ConnectionError("响应未能写入游戏连接")
             if tracker is not None and token is not None:
@@ -1501,7 +1512,10 @@ class GalateaLink:
             expected = response_bytes(outcome.response)
             choices = []
             for index, action in enumerate(request.snapshot.valid_actions):
-                packed = self.ai.pack_choice_from_snapshot(request.snapshot, index, request.msg_type)
+                try:
+                    packed = self.ai.pack_choice_from_snapshot(request.snapshot, index, request.msg_type)
+                except (AttributeError, TypeError, ValueError, OverflowError, struct.error):
+                    continue
                 if response_bytes(packed) == expected:
                     choices.append(index)
             chosen = outcome.choice_id if outcome.choice_id in choices else choices[0] if len(choices) == 1 else None

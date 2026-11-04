@@ -8,11 +8,12 @@ from core import rule_bot
 from data_types import ActionOperation, GameAction
 from model_protocols.v3.constants import MAX_ACTIONS
 from game_constants import LocationInfo
+from core.selection_protocol import parse_selection_prompt
 
 
-MACRO_ACTION_MSGS = frozenset({15, 18, 20, 22, 23, 24, 25, 140, 141})
+MACRO_ACTION_MSGS = frozenset({15, 18, 20, 21, 22, 23, 24, 25, 140, 141})
 MODEL_ACTION_MSGS = frozenset(
-    {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143}
+    {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
 _CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 MIN_MACRO_OPTION_WEIGHT = 1e-4
@@ -33,6 +34,8 @@ def _read_macro_constraints(msg_type, msg_payload):
         "selection_max": 0,
         "cancelable": False,
         "context_value": 0,
+        "prompt_flags": 0,
+        "prompt_value": 0,
     }
     if msg_type in (15, 20) and len(payload) >= 4:
         constraints.update(
@@ -45,8 +48,10 @@ def _read_macro_constraints(msg_type, msg_payload):
     elif msg_type == 22 and len(payload) >= 5:
         constraints.update(context_value=struct.unpack('<H', payload[3:5])[0])
     elif msg_type == 23 and len(payload) >= 8:
-        constraints.update(selection_min=payload[6], selection_max=payload[7])
-    elif msg_type in (25, 140, 141) and len(payload) >= 2:
+        prompt = parse_selection_prompt(msg_type, payload)
+        constraints.update(selection_min=prompt["minimum"], selection_max=prompt["maximum"],
+            context_value=prompt["target"], prompt_flags=prompt["mode"], prompt_value=len(prompt["mandatory"]))
+    elif msg_type in (21, 25, 140, 141) and len(payload) >= 2:
         constraints.update(selection_min=payload[1], selection_max=payload[1])
         if msg_type in (140, 141):
             constraints["context_value"] = payload[1]
@@ -150,6 +155,8 @@ def build_macro_action_pool(
     """
     if msg_type not in MACRO_ACTION_MSGS:
         raise ValueError(f"message type {msg_type} is not a macro action prompt")
+    if type(max_actions) is not int or max_actions < 1:
+        raise ValueError("宏候选容量必须为正整数")
 
     probabilities = _as_probabilities(action_probabilities)
     base_actions = list(base_actions)
@@ -229,21 +236,25 @@ def build_macro_action_pool(
         scored_options.append((option, score))
 
     if len(scored_options) > max_actions:
-        weights = np.asarray([score for _, score in scored_options], dtype=np.float64)
+        # 取消是协议出口，缩减候选池时保留一个，其余位置再按权重采样
+        pinned = [item for item in scored_options if bytes(item[0].get("bytes", b"")) == _CANCEL_RESPONSE][:1]
+        sampled = [item for item in scored_options if bytes(item[0].get("bytes", b"")) != _CANCEL_RESPONSE]
+        weights = np.asarray([score for _, score in sampled], dtype=np.float64)
         weight_sum = weights.sum()
         if weight_sum <= 0 or not np.isfinite(weight_sum):
-            weights = np.full(len(scored_options), 1.0 / len(scored_options))
+            weights = np.full(len(sampled), 1.0 / len(sampled))
         else:
             weights /= weight_sum
 
         chooser = rng if rng is not None else np.random
         selected_indices = chooser.choice(
-            len(scored_options),
-            size=max_actions,
+            len(sampled),
+            size=max_actions - len(pinned),
             replace=False,
             p=weights,
         )
-        selected_options = [scored_options[int(index)][0] for index in selected_indices]
+        selected_options = [item[0] for item in pinned]
+        selected_options.extend(sampled[int(index)][0] for index in selected_indices)
     else:
         selected_options = [option for option, _ in scored_options]
 
@@ -252,9 +263,12 @@ def build_macro_action_pool(
         response = bytes(option.get("bytes", b""))
         response_value = option.get("value")
         description = "Cancel" if response == _CANCEL_RESPONSE else f"Macro Action {pool_index}"
-        if response == _CANCEL_RESPONSE:
+        if msg_type == 21 and response == _CANCEL_RESPONSE:
+            description = "Use server default chain order"
+            operation = ActionOperation.MACRO_SORT
+        elif response == _CANCEL_RESPONSE:
             operation = ActionOperation.CANCEL
-        elif msg_type == 25:
+        elif msg_type in (21, 25):
             operation = ActionOperation.MACRO_SORT
         elif msg_type == 22:
             operation = ActionOperation.REMOVE_COUNTER
@@ -285,6 +299,8 @@ def build_macro_action_pool(
                 selection_count=selected_count,
                 cancelable=macro_constraints["cancelable"],
                 context_value=macro_constraints["context_value"],
+                prompt_flags=macro_constraints["prompt_flags"],
+                prompt_value=macro_constraints["prompt_value"],
                 macro_targets=locations or None,
                 macro_places=places or None,
                 macro_target_codes=codes or None,
@@ -295,4 +311,7 @@ def build_macro_action_pool(
             )
         )
 
+        macro_actions[-1].explicit_response = response_value is None
+        if msg_type in (21, 25):
+            macro_actions[-1].sort_prompt_indices = list(option.get("indices", []))
     return macro_actions

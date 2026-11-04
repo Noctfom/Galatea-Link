@@ -126,6 +126,12 @@ AstrBot 可通过 `POST /api/v1/external-message` 把 QQ 消息投递为 `extern
 
 ## Core 闭环回退
 
+Link 3.3.6 在复杂选择最终写出前增加响应复核，适用于 Core、本地 LLM、远程智能体和规则回退。非法计数、重复索引、无效取消、指示物总数或求和不符会明确失败且不发送；`decision.committed` 仅在校验及网络写出成功后发布。求和校验在线程中执行并使用 Core 时间预算，取消任务不会等待其完成后补发旧动作
+
+V4 诊断的动作组增加 `candidate_stage` 与 `selection_response_checks`，区分基础评分候选、显式完整响应和可直接选择的候选。这是覆盖诊断，不授予 V4 在线推理资格。共享选择上下文及逐项数值见 [LLM 信息契约](LLM_INFORMATION.md#卡片知识范围)
+
+3.3.8 将 Type21 连锁排序纳入同一异步决策与提交复核。外部智能体仍选择 `choice_id`，默认顺序候选按 `MACRO_SORT` 处理，不计为取消或撤选回退；`sort_operation` 及原提示索引是观察的新增字段，现有接口版本及超时控制继续适用
+
 3.3.3 在贪心与温度采样两种 Core 策略下启用 `leaf_first_v1`，V3 在线模型可以直接使用，V4 在线推理限制保持不变。配置文件 `decision`、`GET/PATCH /api/v1/controls` 的 `intervention` 分区以及 WebUI 决策策略共用以下字段，停止状态也可以保存
 
 | 字段 | 默认 | 含义 |

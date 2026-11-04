@@ -16,7 +16,7 @@ CARD_QUERY_FIELDS = frozenset({"code", "position", "current_code", "current_type
     "original_owner", "status_mask", "lscale", "rscale", "link_rating", "link_marker"})
 IDLE_OPERATIONS = (ActionOperation.NORMAL_SUMMON, ActionOperation.SPECIAL_SUMMON,
     ActionOperation.CHANGE_POSITION, ActionOperation.MONSTER_SET, ActionOperation.SPELL_TRAP_SET, ActionOperation.ACTIVATE)
-PROMPT_TYPES = frozenset({10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143})
+PROMPT_TYPES = frozenset({10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143})
 
 
 @dataclass(frozen=True)
@@ -43,9 +43,9 @@ def action_values(action, event_type):
     if values.get("response_value") is None:
         if event_type in (10, 11):
             values["response_value"] = int((action.index << 16) | action.action_type)
-        elif event_type in (12, 13, 14, 16, 19, 143):
+        elif event_type in (12, 13, 14, 16, 19):
             values["response_value"] = int(action.index)
-        elif event_type in (140, 141, 142):
+        elif event_type in (140, 141, 142, 143):
             values["response_value"] = int(action.desc_id)
     return values
 
@@ -200,10 +200,21 @@ def project_online_snapshot(source, player, *, event_type=None, history_projecti
         values["target_entity_idx"] = old_to_new.get(old_target, -1)
         if values.get("macro_targets") is not None:
             values["macro_targets"] = [old_to_new.get(item, -1) for item in values["macro_targets"]]
-        actions.append(GameAction(**values))
+        mapped_action = GameAction(**values)
+        mapped_action.explicit_response = bool(getattr(action, "explicit_response", False))
+        if hasattr(action, "sort_prompt_indices"):
+            mapped_action.sort_prompt_indices = list(action.sort_prompt_indices)
+        actions.append(mapped_action)
     report["groups"]["actions"] = {"mapped": True, "source_complete": not invalid_actions and prompt_type in PROMPT_TYPES and prompt_type != 16,
         "legacy_chain_semantics_unverified": prompt_type == 16,
         "candidate_count": len(actions), "invalid_target_candidates": invalid_actions[:120]}
+    if prompt_type in (15, 18, 20, 21, 22, 23, 24, 25, 140, 141):
+        explicit = bool(actions) and all(getattr(action, "explicit_response", False) or action.decision_bytes
+            or action.decision_value is not None for action in actions)
+        report["groups"]["actions"]["candidate_stage"] = "explicit_responses" if explicit else "base_candidates"
+    else:
+        report["groups"]["actions"]["candidate_stage"] = "direct_candidates"
+    report["groups"]["actions"]["selection_response_checks"] = prompt_type in (15, 20, 21, 22, 23, 25, 26)
     own_deck_known = bool(getattr(source, "initial_deck_known", {}).get(player))
     own_deck_known = own_deck_known and len(getattr(source, f"p{player}_deck_codes", ())) == (global_data.my_deck_len if player == 0 else global_data.op_deck_len)
     own_deck_known = own_deck_known and len(getattr(source, f"p{player}_extra_codes", ())) == (global_data.my_extra_len if player == 0 else global_data.op_extra_len)

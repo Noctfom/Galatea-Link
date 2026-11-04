@@ -62,3 +62,39 @@ V4 转移历史按双方每次真实决策划分，而真实在线服务器通�
 ## 本轮范围
 
 Link 先完成自身的公开信息传导、语义资产维护兼容、诊断导出和回归。Core 特殊受控接入、完整在线转移历史、Type162 重建、BO3 换备和学习采集按各自阶段推进，当前不为这些事项增加 Core 专用服务层
+
+## Core 待核对：Type12 效果询问的描述编号读取
+
+Link 3.3.5 对照 Core 提交 `2b754769077470edf4a08f9f09b7ed7f25f2035d` 的当前源码时，发现 `gamestate.py` 中 `MSG_SELECT_EFFECTYN` 动作分支存在读取错位。此项已在 Link 修正，Core 仍保持只读
+
+当前固定载荷为 13 字节：玩家 1 字节、卡密 4 字节、控制者／区域／序号／位置各 1 字节、描述编号 4 字节。Core 长度定义已经是 13，但该动作分支在读完序号后直接读取描述编号，遗漏位置字节。参考客户端 `integrations/windbot/vendor/Game/GameBehavior.cs` 的 `OnSelectEffectYn` 明确读取了该字节
+
+可独立复现的载荷：
+
+```python
+payload = bytes([0]) + struct.pack('<IBBBBI', 14558127, 0, 4, 0, 8, 0x01020304)
+```
+
+预期 `desc_id=0x01020304`，当前 Core 分支读成 `0x02030408`，并留下最后一个描述字节未读。这会影响效果描述与效果槽绑定，不会改变 Yes／No 应回复 1／0 的规则。这里的位置字节属于现有固定载荷，与 Link 对 Type31 等来源不解析本地定界字节的要求无关
+
+Core 侧可在序号之后、描述编号之前补读位置字节，并核对受控来源确实遵循这一载荷合同。随后回归效果槽绑定和历史描述引用；无需由 Link 修改 Core 代码或新增真实服务器服务层
+
+`tests/test_v4_prompt_projection.py` 的 Link 侧测试正常校验正确描述与效果槽。只读 Core 对照仅在精确复现上述错位值时标记两项预期失败，分别对应双方座位。Core 修正后会自动进入正常的 108 项编码对照，其他不明差异仍会使测试失败
+
+3.3.6 本轮读取到的 Core 工作区已经通过上述 Type12 双座位对照，本段保留初次发现时的复现说明；Core 侧最终确认仍由其维护方完成
+
+## Core 待核对：排序响应与候选描述的对应关系
+
+本轮只读参考的 Core `rule_bot.py` 排序宏候选将目标顺序中的 `idx` 直接依次写出；参考客户端 `GameBehavior.cs` 的 `OnCardSorting` 则按原始候选索引保存新名次。两种数组互为逆排列，三元素环才能暴露差别
+
+例如原候选 `[A, B, C]`，展示的目标顺序为 `[C, A, B]`。网络应回复每个原候选的新名次 `[1, 2, 0]`。直接回复目标索引 `[2, 0, 1]` 虽能通过排列合法性检查，却对应另一个结果，容易出现无报错但执行顺序不同的现象
+
+Link 在 3.3.6 独立修正这一对应关系，生成器的 `macro_target_codes`／位置按目标顺序保存，`decision_bytes` 按原索引名次保存，三循环回归验证二者可互相还原。Core 侧可检查其排序宏生成段及展示日志，本轮不修改 Core
+
+复杂选择数量、必选占位、精确和及 SumGreater 的边界同时参考 [YGOPro Core playerop.cpp](https://github.com/Fluorohydride/ygopro-core/blob/master/playerop.cpp)。Link 的线上响应使用精确长度，不复制 Core 本地 512 字节填充缓冲；这些参考不自动改变其他真实服务器消息布局
+
+3.3.8 将相同名次向量规则扩展到 Type21。依据 [EDOPro 兼容模式读取](https://github.com/edo9300/edopro/blob/master/gframe/duelclient.cpp) 与 [排序交互响应](https://github.com/edo9300/edopro/blob/master/gframe/event_handler.cpp)，连锁排序的自定义响应同样按原候选保存新名次。兼容模式仍是一字节数量和七字节候选，没有采用 EDOPro 宽字段布局
+
+WindBot 的 `OnChainSorting` 选择 `-1`，含义为默认顺序。Link 将该出口作为附加 `MACRO_SORT` 候选，不套用通用取消操作，避免历史中的取消标志和末端回退证据失真。当前只读 Core 的排序生成器不含这一默认候选，因此原生输入对照只比较自定义排列，默认出口通过 Link 的网络提交及历史回归单独验证
+
+同一实体可能对应多个排序项，七字节提示没有效果描述编号。Link 只增加观察元数据中的原提示索引，不为 V4 张量新增字段或虚构效果身份；更精细的模型识别能力需由模型合同另行决定

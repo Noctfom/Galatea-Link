@@ -5,6 +5,50 @@
   "schema_revision": 14,
   "maintenance_sources": [
     {
+      "commit": "2bd44a170e68c64630c7edcbae7f14eb5da7c4a0",
+      "purpose": "只读核对 Type21 基础动作及自定义宏输入，结合客户端排序响应独立接通在线消息和默认顺序出口，不改变模型张量合同",
+      "source_sha256_bytes": {
+        "gamestate.py": "753aa95cd7f0d8e70ba905689bbb1adf13e650ab7c948a176f961d03b6b5adc9",
+        "action_candidates.py": "d851f1b60cca2c61b3e8755f242d60fe9c7282648fedeea3ed57d46bf6e47e6c",
+        "rule_bot.py": "b94b593fbee6a3790b4d9796126d91dc875ce29f6ea9cccfcdb33660618ec68d",
+        "integrations/windbot/vendor/Game/GameBehavior.cs": "54912440191b918b4465b908d8504756682fd4191ea83bd965b3b0782d004ebe"
+      },
+      "online_protocol_references": [
+        "https://github.com/edo9300/edopro/blob/master/gframe/duelclient.cpp",
+        "https://github.com/edo9300/edopro/blob/master/gframe/event_handler.cpp"
+      ]
+    },
+    {
+      "commit": "2bd44a170e68c64630c7edcbae7f14eb5da7c4a0",
+      "purpose": "只读对照最终宏候选编码、固定取消出口及既有末端重试，参考 GKG5 附件容器合同独立实现核验归档，不应用预设",
+      "source_sha256_bytes": {
+        "action_candidates.py": "d851f1b60cca2c61b3e8755f242d60fe9c7282648fedeea3ed57d46bf6e47e6c",
+        "model_versus.py": "8b9406b3ec3f4c39bc9c2443813d708693857b030636a0d5e27e0b104c491431",
+        "model_artifacts.py": "a38a551b90b344393820dc8ad85e12214831d5315f8016cbb6f8767b41b235b0",
+        "docs/deployment_packages.md": "7c1793d11f2b0cbff2d19add41b86898bd7d387f60ee735b055aa34e4db7c5e4"
+      }
+    },
+    {
+      "commit": "e20db72bf47a0281093745767d28d6fecc41ec03",
+      "working_tree": true,
+      "purpose": "只读对照复杂选择原生约束和基础动作，Link 采用独立严格网络响应并修正排序对应关系，不使用本地填充缓冲区",
+      "source_sha256_bytes": {
+        "selection_protocol.py": "a312c45687a9f37b191dd2879bc2b4af496e5c8e3cc6963f4625021c8c0e8bad",
+        "gamestate.py": "db2d15d1c552d1442124d51410cf69fb4b0816a4a47286858432925b4f8ce316",
+        "rule_bot.py": "b94b593fbee6a3790b4d9796126d91dc875ce29f6ea9cccfcdb33660618ec68d",
+        "action_candidates.py": "d851f1b60cca2c61b3e8755f242d60fe9c7282648fedeea3ed57d46bf6e47e6c"
+      }
+    },
+    {
+      "commit": "2b754769077470edf4a08f9f09b7ed7f25f2035d",
+      "purpose": "只读核对选择提示及原始快照，借助 WindBot 读取逻辑确认 Type12 位置字节和数字宣言响应编号，未改变模型结构",
+      "source_sha256_bytes": {
+        "gamestate.py": "e547131055c37ee3572cbee255cb072c1ac6997ae0a4cb1a3e1921508968c9c5",
+        "integrations/windbot/vendor/Game/GameBehavior.cs": "54912440191b918b4465b908d8504756682fd4191ea83bd965b3b0782d004ebe",
+        "integrations/windbot/vendor/Game/GameAI.cs": "100a57d5fc201899720bf7cdb6ab505bd1128127e01494ca2ca8c5ca1330c198"
+      }
+    },
+    {
       "commit": "5be189a1c6881322ccefa2095a8f59fb8361a751",
       "purpose": "参考竞技场 leaf_first_v1 闭环回退，Link 重新实现为无 Torch 的异步部署策略，不修改模型输入",
       "source_sha256_bytes": {

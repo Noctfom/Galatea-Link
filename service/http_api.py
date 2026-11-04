@@ -208,7 +208,8 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "catalog": True,
                 "selection": True,
                 "gkg_import": True,
-                "gkg_package_format_versions": [2, 4],
+                "gkg_package_format_versions": [2, 4, 5],
+                "gkg_optional_content": "archive_only",
                 "v4_observation_diagnostics_endpoint": "/api/v1/models/diagnostics/v4",
             },
             "asset_management": {

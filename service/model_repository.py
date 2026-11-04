@@ -20,6 +20,8 @@ from model_protocols.registry import inspect_onnx_artifact
 from model_protocols.v3.constants import REQUIRED_ASSET_FILENAMES
 from model_protocols.v3.semantic_assets import validate_semantic_bundle
 from training_validation import validate_model_prefix
+from service.package_content import (MAX_CONTENT_FILES, MAX_CONTENT_MANIFEST_BYTES, check_path_collisions,
+    content_records, install_content, path_key, validate_content, validate_content_path)
 
 
 GKG_FORMAT_VERSION = 2
@@ -358,6 +360,7 @@ class LinkModelRepository:
                 protocol=validated["protocol"],
                 frozen_pool_only=frozen_pool_only,
             )
+            content = install_content(stage_root, self.package_root, validated["manifest"], validated["content_files"])
         return {
             "package_name": package_name,
             "package_format_version": validated["manifest"]["package_format_version"],
@@ -369,6 +372,7 @@ class LinkModelRepository:
             "installed_asset_files": list(validated["asset_files"]),
             "assets_path": assets_path,
             "warnings": compatibility_warnings,
+            "content": content,
         }
 
     # 在暂存区合并兼容历史并保留已验证的旧资产来源，不修改输入部署包
@@ -476,15 +480,43 @@ class LinkModelRepository:
     # 限制 ZIP 成员类型、路径、大小和压缩比后流式解压
     def _safe_extract(self, archive: zipfile.ZipFile, target_root: Path) -> None:
         members = archive.infolist()
-        if not members or len(members) > MAX_ARCHIVE_MEMBERS:
+        if not members or len(members) > MAX_ARCHIVE_MEMBERS + MAX_CONTENT_FILES:
             raise ValueError("GKG 成员数量超出安全范围")
+        for info in members:
+            if "\\" in info.filename or any(part in ("", ".", "..") for part in info.filename.rstrip("/").split("/")):
+                raise ValueError("GKG 包含不安全路径")
+        # 先有界读取清单决定容器能力，再验证所有路径，旧格式仍执行原有限额
+        try:
+            with archive.open("manifest.json") as stream:
+                raw_manifest = stream.read(MAX_CONTENT_MANIFEST_BYTES + 1)
+        except KeyError as exc:
+            raise ValueError("GKG 缺少有效 manifest.json") from exc
+        if len(raw_manifest) > MAX_CONTENT_MANIFEST_BYTES:
+            raise ValueError("GKG 清单过大")
+        manifest = json.loads(raw_manifest)
+        if not isinstance(manifest, dict) or type(manifest.get("package_format_version")) is not int:
+            raise ValueError("GKG 清单或格式版本无效")
+        version = manifest["package_format_version"]
+        if version not in (2, 4, 5):
+            raise ValueError("GKG 部署包格式版本不受支持")
+        records = content_records(manifest)
+        if version != 5 and (len(members) > MAX_ARCHIVE_MEMBERS or len(raw_manifest) > MAX_MANIFEST_BYTES):
+            raise ValueError("旧 GKG 成员数量或清单大小超出范围")
+        directories = {"/".join(row["path"].split("/")[:index]) for row in records
+            for index in range(1, len(row["path"].split("/")))}
         seen = set()
         total_size = 0
         for info in members:
-            if info.is_dir() or "/" in info.filename or "\\" in info.filename:
-                raise ValueError(f"GKG 包含不安全路径: {info.filename!r}")
-            validate_safe_filename(info.filename)
-            folded = info.filename.casefold()
+            if info.is_dir():
+                if version != 5 or info.filename[:-1] not in directories:
+                    raise ValueError("GKG 包含未声明目录")
+            elif "/" in info.filename:
+                if version != 5:
+                    raise ValueError("旧 GKG 不支持附件路径")
+                validate_content_path(info.filename)
+            else:
+                validate_safe_filename(info.filename)
+            folded = path_key(info.filename)
             if folded in seen:
                 raise ValueError(f"GKG 包含重复成员: {info.filename}")
             seen.add(folded)
@@ -494,7 +526,8 @@ class LinkModelRepository:
                 raise ValueError("GKG 包含不支持的压缩格式")
             unix_mode = info.external_attr >> 16
             file_type = stat.S_IFMT(unix_mode)
-            if stat.S_ISLNK(unix_mode) or file_type not in {0, stat.S_IFREG}:
+            allowed_types = {0, stat.S_IFDIR} if info.is_dir() else {0, stat.S_IFREG}
+            if stat.S_ISLNK(unix_mode) or file_type not in allowed_types:
                 raise ValueError("GKG 不允许符号链接或特殊文件")
             if info.file_size < 0 or info.file_size > MAX_MEMBER_BYTES:
                 raise ValueError("GKG 成员大小超出安全范围")
@@ -505,10 +538,17 @@ class LinkModelRepository:
                 if info.compress_size <= 0 or info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
                     raise ValueError("GKG 成员压缩比异常")
 
+        if sum("/" not in info.filename for info in members) > MAX_ARCHIVE_MEMBERS:
+            raise ValueError("GKG 根目录成员数量超出安全范围")
+        check_path_collisions(info.filename for info in members if not info.is_dir())
+
         created = []
         try:
             for info in members:
+                if info.is_dir():
+                    continue
                 destination = target_root / info.filename
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 written = 0
                 with archive.open(info, "r") as source, destination.open("xb") as target:
                     created.append(destination)
@@ -530,7 +570,7 @@ class LinkModelRepository:
     # 校验解包后的 GKG 清单、模型身份和语义资产
     def _validate_stage(self, stage_root: Path) -> dict[str, Any]:
         manifest_path = stage_root / "manifest.json"
-        if not manifest_path.is_file() or manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+        if not manifest_path.is_file() or manifest_path.stat().st_size > MAX_CONTENT_MANIFEST_BYTES:
             raise ValueError("GKG 缺少有效 manifest.json")
         with manifest_path.open("r", encoding="utf-8") as stream:
             manifest = json.load(stream)
@@ -539,9 +579,12 @@ class LinkModelRepository:
         package_version = manifest.get("package_format_version")
         if type(package_version) is not int:
             raise ValueError("GKG 格式版本必须是整数")
-        package_protocol = 3 if package_version == 2 else 4 if package_version == 4 else None
+        package_protocol = 3 if package_version == 2 else 4 if package_version in (4, 5) else None
         if package_protocol is None:
             raise ValueError("GKG 部署包格式版本不受支持")
+        if package_version != 5 and manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+            raise ValueError("旧 GKG 清单过大")
+        attachments = validate_content(stage_root, manifest)
         v4_assets = None
         if package_protocol == 4:
             from model_protocols.v4.assets import inspect_protocol_identity, load_v4_assets
@@ -734,6 +777,7 @@ class LinkModelRepository:
             "model_id": next(iter(model_ids), None),
             "asset_files": asset_files,
             "protocol": package_protocol,
+            "content_files": attachments,
         }
 
     # 读取暂存模型并核对内部身份

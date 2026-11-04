@@ -2075,6 +2075,15 @@ function acceptDroppedGkg(event) {
   updateGkgFileLabel();
 }
 
+// 展示附件归档位置，预设和卡组不会自动应用到当前会话
+function showImportedContent(imported) {
+  const content = imported.content;
+  const label = query("#gkgFileLabel");
+  if (content?.files?.length && label) {
+    label.textContent = `已归档 ${content.files.length} 个附件：${content.archive_path}；卡组、重放及预设仅保存，不自动启用`;
+  }
+}
+
 // 上传并导入浏览器选择的 GKG 包
 async function importGkg(event) {
   event.preventDefault();
@@ -2095,6 +2104,7 @@ async function importGkg(event) {
     renderModelCatalog(result.catalog);
     input.value = "";
     updateGkgFileLabel();
+    showImportedContent(result.imported);
     const warning = result.imported.warnings?.find((item) => item.warning);
     notify(`GKG 导入成功，共安装 ${result.imported.installed_files.length} 个新文件${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
   } finally {
@@ -2120,6 +2130,7 @@ async function importLocalPackage() {
       body: JSON.stringify({ filename, activate: true }),
     });
     renderModelCatalog(result.catalog);
+    showImportedContent(result.imported);
     const warning = result.imported.warnings?.find((item) => item.warning);
     notify(`本地 GKG 包 ${filename} 已导入${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
   } finally {

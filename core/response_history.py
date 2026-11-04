@@ -4,7 +4,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from numbers import Integral, Real
 import math
-import struct
+from core.response_codec import encode_int_response
 
 
 PUBLIC_EVENT_TYPES = frozenset({40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 63, 64, 65,
@@ -55,16 +55,16 @@ def freeze_action(action):
             return tuple(freeze(item) for item in value)
         raise ValueError("动作历史包含不支持的字段类型")
     from data_types import GameAction
-    names = {*GameAction.__dataclass_fields__, "summon_method_id"}
+    names = {*GameAction.__dataclass_fields__, "summon_method_id", "explicit_response", "sort_prompt_indices"}
     return tuple((name, freeze(getattr(action, name))) for name in sorted(names) if hasattr(action, name))
 
 
 # 按当前网络响应约定比较字节，无法识别的响应不猜测其候选
 def response_bytes(response):
     if response is None:
-        return struct.pack("<i", -1)
+        return encode_int_response(-1)
     if isinstance(response, Integral):
-        return struct.pack("<i", int(response))
+        return encode_int_response(response)
     if isinstance(response, (bytes, bytearray)):
         return bytes(response)
     raise ValueError("无法识别响应类型")

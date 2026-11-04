@@ -25,7 +25,8 @@ def freeze_world(value):
 # 显式响应不依赖宏动作池的临时序号，描述文本也不参与候选身份
 def action_token(action):
     names = (field.name for field in fields(action)) if is_dataclass(action) else vars(action)
-    explicit = bool(getattr(action, "decision_bytes", None)) or getattr(action, "decision_value", None) is not None
+    explicit = (getattr(action, "explicit_response", False) or bool(getattr(action, "decision_bytes", None))
+        or getattr(action, "decision_value", None) is not None)
     return freeze_world({name: getattr(action, name) for name in names
         if name != "desc_str" and not (explicit and name == "index")})
 

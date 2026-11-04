@@ -24,12 +24,13 @@ from model_protocols.v3.effect_slot_binding import resolve_runtime_effect_slot
 from core.online_state import OnlineStateProjection, QUERY_FIELD_NAMES
 from core.response_history import OnlineResponseHistory, VisibleStateDigest
 from core.public_chain import PublicChainProgress
+from core.selection_protocol import SELECTION_MSGS, parse_selection_prompt, selection_context
 
 # Link 接收标准网络消息流且不解析 Core 本地缓冲区的幽灵字节
 CORE_HAS_GHOST_BYTE = False
 
 INTERACTION_MESSAGE_TYPES = frozenset({
-    10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26,
+    10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     140, 141, 142, 143,
 })
 
@@ -44,6 +45,7 @@ INTERACTION_MIN_PAYLOAD_LENGTHS = {
     18: 6,
     19: 6,
     20: 5,
+    21: 2,
     22: 6,
     23: 10,
     24: 6,
@@ -83,7 +85,7 @@ class MessageParser:
         # --- 交互类 ---
         10: -1, 11: -1, 12: 13, 13: 5, 14: -1, 15: -1, 16: -1, 
         18: 6,  # PLACE (1+1+4) [已验证]
-        19: 6, 20: -1, 22: -1, 23: -1, 
+        19: 6, 20: -1, 21: -1, 22: -1, 23: -1,
         24: 6,  # DISFIELD (同18) [已验证]
         25: -1, 26: -1, 
         
@@ -331,7 +333,7 @@ class MessageParser:
         # 1. 严格白名单 (移除 0)
         VALID_MSGS = {
             1, 2, 3, 4, 5, 
-            10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
+            10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
             30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
             40, 41, 42,
             50, 53, 54, 55, 56, 
@@ -455,6 +457,7 @@ class DuelState:
         self.response_history = OnlineResponseHistory()
         self.public_chain_progress = PublicChainProgress()
         self._action_prompt_type = None
+        self._selection_prompt = None
         self._initial_decks = {0: (None if p0_main is None else tuple(p0_main), None if p0_extra is None else tuple(p0_extra)),
             1: (None if p1_main is None else tuple(p1_main), None if p1_extra is None else tuple(p1_extra))}
         self.effect_slot_resolver = resolve_runtime_effect_slot
@@ -491,6 +494,7 @@ class DuelState:
         self.response_history.reset()
         self.public_chain_progress = PublicChainProgress()
         self._action_prompt_type = None
+        self._selection_prompt = None
         self._initial_decks = {0: (None, None), 1: (None, None)}
         self.turn = 0
         self.phase = 0
@@ -774,6 +778,7 @@ class DuelState:
                     msg_type,
                     msg_payload,
                 )
+                self._selection_prompt = parse_selection_prompt(msg_type, msg_payload) if msg_type in SELECTION_MSGS else None
                 self._parse_valid_actions(msg_type, stream)
                 self._action_prompt_type = msg_type
                 self._bind_action_effect_slots()
@@ -963,6 +968,34 @@ class DuelState:
                             relations.remove(removed_location)
                     info['is_equipped'] = bool(info.get('equipped_by', []) or info.get('is_equip_source'))
 
+    # 将已验证复杂提示转换为基础动作，祭品值指示物和求和参数分别保留
+    def _parse_complex_actions(self, kind, prompt):
+        rows = prompt["candidates"]
+        for row in rows:
+            location = LocationInfo.encode(row["controller"], row["location"], row["sequence"], 0)
+            values = dict(action_type=kind, index=row["index"], code=row["code"], target_entity_idx=location,
+                target_location_raw=location, response_value=row["index"], selection_count=1)
+            if kind == 20:
+                values.update(desc_str=f"Tribute {row['code']} (value={row['release_value']})",
+                    operation_id=int(ActionOperation.SELECT), selection_min=prompt["minimum"], selection_max=prompt["maximum"],
+                    cancelable=prompt["cancelable"], context_value=row["release_value"], macro_target_values=[row["release_value"]])
+            elif kind == 23:
+                values.update(desc_str=f"Sum Material {row['code']} (value={row['sum_value']})",
+                    operation_id=int(ActionOperation.SELECT), selection_min=prompt["minimum"], selection_max=prompt["maximum"],
+                    context_value=prompt["target"], prompt_flags=prompt["mode"], prompt_value=len(prompt["mandatory"]),
+                    macro_target_values=[row["sum_value"]])
+            elif kind == 22:
+                values.update(desc_str=f"Remove Counter {row['code']} (available={row['available']})",
+                    operation_id=int(ActionOperation.REMOVE_COUNTER), context_value=prompt["quantity"],
+                    prompt_value=prompt["counter_type"], macro_target_values=[row["available"]])
+            else:
+                values.update(desc_str=f"Sort Candidate {row['code']}", operation_id=int(ActionOperation.MACRO_SORT),
+                    selection_min=len(rows), selection_max=len(rows))
+            self.current_valid_actions.append(GameAction(**values))
+        if kind == 20 and prompt["cancelable"]:
+            self.current_valid_actions.append(GameAction(kind, -1, desc_str="Cancel", operation_id=int(ActionOperation.CANCEL),
+                selection_min=prompt["minimum"], selection_max=prompt["maximum"], cancelable=True))
+
     def _parse_valid_actions(self, msg_type, stream):
         """
         解析交互消息，生成 GameAction 列表
@@ -971,8 +1004,11 @@ class DuelState:
         stream.seek(0)
         
         try:
+            if msg_type in (20, 21, 22, 23, 25):
+                self._parse_complex_actions(msg_type, self._selection_prompt or parse_selection_prompt(msg_type, stream.getvalue()))
+
             # 1. MSG_SELECT_IDLECMD (11)
-            if msg_type == 11:
+            elif msg_type == 11:
                 # 尝试读取 Player，读不到就直接退出
                 b = stream.read(1)
                 if not b: return 
@@ -1231,12 +1267,13 @@ class DuelState:
             # 5. MSG_SELECT_YESNO (13) / EFFECTYN (12)
             elif msg_type == 12:
                 # [C++源码证实] 有卡片实体
-                # 结构: P(1) + Code(4) + C(1) + L(1) + S(1) + Desc(4)
+                # 结构包含四字节位置，最后的位置字节不属于本地缓冲区定界
                 stream.read(1) # P
                 code = struct.unpack('<I', stream.read(4))[0]
                 c = struct.unpack('B', stream.read(1))[0]
                 l = struct.unpack('B', stream.read(1))[0]
                 s = struct.unpack('B', stream.read(1))[0]
+                stream.read(1) # 位置字节属于标准十三字节载荷
                 desc = struct.unpack('<I', stream.read(4))[0]
                 
                 # 关键：绑定卡片位置,让 AI 知道是哪张卡在问
@@ -1455,6 +1492,9 @@ class DuelState:
                         macro_target_locations=selected_locations,
                         macro_target_codes=selected_codes,
                     ))
+
+                if self.current_valid_actions and self.current_valid_actions[-1].index < 0:
+                    self.current_valid_actions.insert(0, self.current_valid_actions.pop())
 
             # =================================================================
             # [阶段一追加] 9. 宣言类消息解析
@@ -1882,6 +1922,9 @@ class DuelState:
                     list(value) if value is not None else None,
                 )
             
+            if hasattr(act, 'sort_prompt_indices'):
+                new_act.sort_prompt_indices = list(act.sort_prompt_indices)
+
             # 2. 单目标指针映射 (绝对不能删！防止 GPU 越界 NaN 的核心)
             if new_act.target_entity_idx >= 0 and new_act.index != -1:
                 c, l, s, _ = LocationInfo.decode(new_act.target_entity_idx)
@@ -1934,6 +1977,7 @@ class DuelState:
         snap.observed_transitions = self.response_history.snapshot()
         snap.observed_history_coverage = self.response_history.coverage()
         snap.public_chain_progress = self.public_chain_progress.snapshot()
+        snap.selection_context = selection_context(self._selection_prompt) if final_actions and self._selection_prompt else None
         snap.action_prompt_type = self._action_prompt_type if final_actions else None
         return snap
     

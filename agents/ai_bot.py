@@ -276,7 +276,7 @@ class AiBot:
             probability_margin = 1.0
 
         chosen = snap.valid_actions[sel_idx]
-        response = self._pack_response(chosen, msg_type, msg_args)
+        response = self._pack_response(chosen, msg_type, msg_args, player_id=snap.global_data.to_play)
         return CoreDecision(
             choice_id=sel_idx,
             action=chosen,
@@ -328,17 +328,19 @@ class AiBot:
             raise ValueError("choice_id 必须是整数")
         if not 0 <= choice_id < len(snap.valid_actions):
             raise ValueError(f"choice_id 超出合法动作范围: {choice_id}")
-        return self._pack_response(snap.valid_actions[choice_id], msg_type, msg_args)
+        return self._pack_response(snap.valid_actions[choice_id], msg_type, msg_args, player_id=snap.global_data.to_play)
 
-    def _pack_response(self, action, msg_type=0, msg_args=None):
+    def _pack_response(self, action, msg_type=0, msg_args=None, *, player_id=None):
         # ==========================================================
         # 优先检查动作是否携带有物理外挂（宏动作包裹）
         # 如果有 decision_bytes，说明这是经过 RuleBot 完美打包的套餐，直接透传
         # ==========================================================
-        if hasattr(action, 'decision_bytes') and action.decision_bytes:
+        if getattr(action, 'explicit_response', False) or getattr(action, 'decision_bytes', b''):
             return action.decision_bytes
         if getattr(action, 'decision_value', None) is not None:
             return int(action.decision_value)
+        if msg_type in (21, 25):
+            raise ValueError("排序必须提交完整名次向量或明确的默认顺序响应")
         # ==========================================================
         # 1. 整型槽类 (调用 C++ set_responsei) - 绝对不能返回 bytes
         # 包含: 10(Battle), 11(Idle), 12(EffectYN), 13(YesNo), 
@@ -357,9 +359,11 @@ class AiBot:
         # 包含: 15(SelectCard), 20(Tribute), 22(Counter), 26(Unselect)
         # ==========================================================
         elif msg_type in [15, 20, 22, 26]:
-            if action.index < 0 or action.index > 255:
+            if action.index < 0:
                 # Cancel 指令 (-1)，转换为 4 字节的 0xFFFFFFFF
                 return int(-1).to_bytes(4, byteorder='little', signed=True)
+            if action.index > 255:
+                raise ValueError("选择候选索引超出八位响应容量")
             # 兜底：数量(Count)=1, 后接选中的索引
             return bytes([1, action.index]) 
         
@@ -370,7 +374,9 @@ class AiBot:
             zone_id = action.index
             
             # 🎯 获取 AI 真实的绝对座位号（默认 0 兜底）
-            my_p = getattr(self, 'player_id', 0) 
+            my_p = getattr(self, 'player_id', 0) if player_id is None else player_id
+            if my_p not in (0, 1):
+                raise ValueError("区域响应缺少有效玩家座位")
             op_p = 1 - my_p
             
             # 如果索引大于等于 16，说明是对手的格子；否则是自己的格子
