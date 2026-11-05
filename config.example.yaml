@@ -71,6 +71,9 @@ decision:
   force_llm_message_types: []
   include_core_suggestion: true
   core_time_budget: 5.0
+  # 共用正常决策推理的反馈，持续旁路采样另外开启
+  core_feedback_enabled: true
+  core_feedback_passive_enabled: false
   llm_time_budget: 12.0
   autonomous_intervention_enabled: false
   autonomous_allowed_modes: ["core_only", "hybrid", "llm_review", "llm_only"]

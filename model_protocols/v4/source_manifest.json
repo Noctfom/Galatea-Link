@@ -3,6 +3,8 @@
   "commit": "1b0fa025994b6eabb8c58dc1ed2090bfbea28d04",
   "model_protocol_version": 4,
   "schema_revision": 14,
+  "link_online_input_policy": "player_view_compatible_v1",
+  "link_online_history_policy": "masked_unavailable",
   "maintenance_sources": [
     {
       "commit": "2bd44a170e68c64630c7edcbae7f14eb5da7c4a0",

@@ -81,7 +81,7 @@ Link 服务启动时先读取 `config.yaml`，然后读取同目录下的本地�
 
 模型协议是兼容边界，不等同于某个 Galatea Core 发布版本。同为 V3 的后续 Core 版本继续使用 V3 适配器；只有制品协议真正升级时才新增目录
 
-V4 使用 `model_assets/v4/<model_id>`，必需精确词表和编译语义三件套，不读取 V3 资产代替。已加载 V4 模型在 `core_only`、`hybrid` 和 `llm_review` 下会因 Link 在线状态与历史编码尚未验收而拒绝连接；显式 `llm_only` 仍可使用本地或远程 LLM。PTH 语义更新还须通过兼容清单验证，ONNX 保持冻结语义，详见 [V4 接入说明](V4_ADAPTER.md)
+V4 使用 `model_assets/v4/<model_id>`，必需精确词表和编译语义三件套，不读取 V3 资产代替。3.3.9 起已加载 V4 模型可直接在 `core_only`、`hybrid` 和 `llm_review` 下兼容在线运行，无法对齐的转移历史默认屏蔽，无需新增启用开关。`llm_only` 仍不调用 Core 建议。PTH 语义更新须通过兼容清单验证，ONNX 保持冻结语义，详见 [V4 接入说明](V4_ADAPTER.md)
 
 ## `llm` Link 内置 LLM
 

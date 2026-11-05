@@ -13,6 +13,7 @@ from utils.card_reader import card_db
 from core.selection_options import build_selection_options
 from core.selection_protocol import SELECTION_MSGS, SelectionProtocolError
 from core.response_codec import encode_int_response
+from core.chain_protocol import parse_online_chain
 
 # --- 消息类型常量 ---
 MSG_SELECT_BATTLECMD = 10
@@ -261,12 +262,9 @@ def get_rule_decision(
 
         elif msg_type == MSG_SELECT_CHAIN:
             try:
-                # 1. 精确读取头部的 4 个字节
-                header_start = stream.read(4)
-                if len(header_start) < 4: raise Exception("Header incomplete")
-                
-                count = header_start[1]
-                forced = header_start[3] # 强制标志位
+                prompt = parse_online_chain(payload)
+                count = len(prompt['candidates'])
+                forced = prompt['forced']
                 
                 # 2. 构造选项：无论是谁，只能从 0 到 count-1 里选
                 candidates = list(range(count))

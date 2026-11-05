@@ -419,9 +419,9 @@ class LinkModelRepository:
                         "model_id",
                         "model_prefix",
                         "iteration",
-                        "run_id",
                     )
                 }
+                inspected["run_id"] = manifest.get("run_id") if manifest["model_protocol_version"] == 4 else manifest["run_id"]
                 files = [path.name]
         elif path.suffix.casefold() == ".onnx":
             inspected = inspect_onnx_artifact(path)
@@ -461,7 +461,10 @@ class LinkModelRepository:
         if protocol == 4:
             from model_protocols.v4.assets import PROTOCOL_IDENTITY_KEYS
             result.update({key: inspected.get(key) for key in PROTOCOL_IDENTITY_KEYS})
-            result.update({"online_inference_ready": False, "online_block_reason": "Link V4 在线历史与状态编码待验收", "training_stage": inspected.get("training_stage")})
+            result.update({"online_inference_ready": True, "online_block_reason": None,
+                "online_inference_mode": "player_view_compatible_v1", "online_history_policy": "masked_unavailable",
+                "native_online_observation_complete": False, "spectator_evaluation_supported": False,
+                "training_stage": inspected.get("training_stage")})
         return result
 
     # 返回模型专属资产或兼容旧布局的公共 V3 资产

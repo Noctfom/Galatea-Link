@@ -44,7 +44,9 @@ def action_values(action, event_type):
         if event_type in (10, 11):
             values["response_value"] = int((action.index << 16) | action.action_type)
         elif event_type in (12, 13, 14, 16, 19):
-            values["response_value"] = int(action.index)
+            # 原生连锁取消保留未设置的响应特征，发包仍按候选索引返回负一
+            if not (event_type == 16 and action.index == -1):
+                values["response_value"] = int(action.index)
         elif event_type in (140, 141, 142, 143):
             values["response_value"] = int(action.desc_id)
     return values
@@ -205,8 +207,9 @@ def project_online_snapshot(source, player, *, event_type=None, history_projecti
         if hasattr(action, "sort_prompt_indices"):
             mapped_action.sort_prompt_indices = list(action.sort_prompt_indices)
         actions.append(mapped_action)
-    report["groups"]["actions"] = {"mapped": True, "source_complete": not invalid_actions and prompt_type in PROMPT_TYPES and prompt_type != 16,
-        "legacy_chain_semantics_unverified": prompt_type == 16,
+    chain_unverified = prompt_type == 16 and coverage.get("chain_entry_size") != 14
+    report["groups"]["actions"] = {"mapped": True, "source_complete": not invalid_actions and prompt_type in PROMPT_TYPES and not chain_unverified,
+        "legacy_chain_semantics_unverified": chain_unverified,
         "candidate_count": len(actions), "invalid_target_candidates": invalid_actions[:120]}
     if prompt_type in (15, 18, 20, 21, 22, 23, 24, 25, 140, 141):
         explicit = bool(actions) and all(getattr(action, "explicit_response", False) or action.decision_bytes

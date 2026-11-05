@@ -66,6 +66,7 @@ class LinkSessionManager:
         self._astrbot_clients: dict[str, dict[str, Any]] = {}
         self._dsh_integration = ExternalIntegrationRegistry("dsh", self._events)
         self._last_v4_diagnostics = None
+        self._last_model_feedback = None
 
     # 返回当前是否持有仍在执行的游戏任务
     @property
@@ -765,6 +766,14 @@ class LinkSessionManager:
                 "catalog": self.get_model_catalog(),
             }
 
+    # 显式将已归档 GKG 卡组安装到本地仓库且不切换当前卡组
+    async def import_package_decks(self, archive_id: str) -> dict[str, Any]:
+        from service.package_decks import install_package_decks
+        async with self._control_lock:
+            result = await asyncio.to_thread(install_package_decks, self.config_path.parent, archive_id)
+            self._events.publish("service.deck.package_imported", result)
+            return {**result, "catalog": self.get_deck_catalog()}
+
     # 导入专用部署目录中已经存在的 GKG 包
     async def import_local_model_package(
         self,
@@ -877,6 +886,23 @@ class LinkSessionManager:
             if report.get("available"):
                 self._last_v4_diagnostics = deepcopy(report)
         return deepcopy(self._last_v4_diagnostics or empty_v4_diagnostics())
+
+    # 读取当前或已结束会话的有界模型反馈，空闲时不加载模型
+    def get_model_feedback(self):
+        from copy import deepcopy
+        from core.model_feedback import ModelFeedbackHistory
+        runtime = getattr(self._link, 'runtime', None)
+        getter = getattr(runtime, 'get_model_feedback', None)
+        if callable(getter):
+            report = getter()
+            if report.get('available'):
+                self._last_model_feedback = deepcopy(report)
+            return report
+        report = deepcopy(self._last_model_feedback or ModelFeedbackHistory().snapshot())
+        controls = self.get_controls()['intervention']
+        report['enabled'] = controls.get('core_feedback_enabled', True)
+        report['passive_enabled'] = controls.get('core_feedback_passive_enabled', False)
+        return report
 
     # 读取最近一次提供给 LLM 的可见信息快照
     def get_latest_observation(self) -> dict[str, Any] | None:
@@ -1012,6 +1038,9 @@ class LinkSessionManager:
 
     # 清空单个游戏会话引用但保留诊断信息
     def _clear_session(self) -> None:
+        self.get_model_feedback()
+        if self._last_model_feedback:
+            self._last_model_feedback.update(scope='last_duel', current=False, passive_busy=False)
         self.get_v4_diagnostics()
         if self._last_v4_diagnostics:
             self._last_v4_diagnostics["scope"] = "last_duel"

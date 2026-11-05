@@ -2,6 +2,8 @@
 
 Link 可以通过独立的 `Galatea_Link_DSH` 插件接入 deepseek-harness。dsh 使用自己配置的模型、人格和当前会话，Link 负责 YGOPro 协议、Core 推理、合法动作和时限回退
 
+近期 V4 和在线解析更新保持 API v1，已具备桥接能力的插件不要求与 Link 同步升级。工作区插件 0.1.1 的后续维护项和可选新功能见 [升级兼容方案](INTEGRATION_COMPATIBILITY.md)
+
 ## 交给 dsh 安装
 
 向 dsh 提供插件目录，并发送：
@@ -56,7 +58,7 @@ HTTP、事件流、临时会话、卡组、动态控制和决策身份接口继�
 
 ## 版本与验证边界
 
-桥接能力从 Link `3.2.0` 提供，Link 当前版本见根目录更新记录，插件版本独立为 `0.1.0`。插件适配本地 dsh `0.1.7-rc.1` 的 `subagents.start`，以及官方 `0.2.1-rc.2` 的 `subagents.startActivation`
+桥接能力从 Link `3.2.0` 提供，Link 当前版本见根目录更新记录。工作区插件版本独立为 `0.1.1`；下述运行验证使用了最初的 `0.1.0` 桥接实现，不代表已经重新验收后续插件改动。既有适配覆盖本地 dsh `0.1.7-rc.1` 的 `subagents.start`，以及 `0.2.1-rc.2` 的 `subagents.startActivation`
 
 本地旧版本已经使用真实 Cordis、工具注册器、AgentLoop 和 fork 后端测试，通过确定性模型确认上下文继承、结构化动作和摘要注入；HTTP/WebSocket 闭环也由真实 Link 服务验证。现代入口通过接口契约测试，尚未在升级后的完整 dsh 实例运行。真实模型延迟、实际游戏服务器与长时间对局需要现场联调
 

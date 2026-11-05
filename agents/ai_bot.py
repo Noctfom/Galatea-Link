@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 from model_protocols import load_model_backend
+from core.model_feedback import serialize_model_evaluation
 
 
 # 安全输出模型日志并兼容 Windows 控制台编码
@@ -35,6 +36,7 @@ class CoreDecision:
     policy_mode: str = "greedy"
     temperature: float | None = None
     available_choice_ids: tuple[int, ...] = ()
+    feedback: dict | None = None
 
 class AiBot:
     def __init__(self, device='cpu', net_config=None, initialize_network=True):
@@ -208,13 +210,14 @@ class AiBot:
         temperature=0.8,
         excluded_choice_ids=(),
         soft_excluded_choice_ids=(),
+        collect_feedback=False,
     ):
         """按所选 Core 策略返回动作、置信度和协议响应"""
         if not self.model_available:
             raise RuntimeError("当前 AI 控制器未加载本地推理网络")
         if self.net is not None:
             self.net.eval()
-        if not snap.valid_actions or not snap.entities:
+        if not snap.valid_actions or (not snap.entities and getattr(self, "model_protocol_version", None) != 4):
             return None
 
         runtime = getattr(self, "inference_runtime", None)
@@ -234,7 +237,12 @@ class AiBot:
                 snap,
                 player_id=snap.global_data.to_play,
             )
-        logits, _, _ = self._infer(tensor_dict)
+        feedback = None
+        if collect_feedback and callable(getattr(runtime, 'infer_with_evaluation', None)):
+            logits, values, _, predictions = runtime.infer_with_evaluation(tensor_dict)
+            feedback = serialize_model_evaluation(values, predictions)
+        else:
+            logits, _, _ = self._infer(tensor_dict)
 
         # 网络已经内置 act_mask 并把无效槽位变成极小值
         valid_logits = np.asarray(logits, dtype=np.float64)[0, :len(snap.valid_actions)].copy()
@@ -276,6 +284,13 @@ class AiBot:
             probability_margin = 1.0
 
         chosen = snap.valid_actions[sel_idx]
+        if feedback is not None:
+            top = np.argsort(probabilities)[::-1][:5]
+            feedback['policy'] = {'selected_choice_id': sel_idx, 'confidence': confidence,
+                'mode': normalized_policy, 'temperature': normalized_temperature if normalized_policy == 'deployment' else None,
+                'top_actions': [{'choice_id': int(index), 'probability': float(probabilities[index]),
+                    'description': str(getattr(snap.valid_actions[index], 'desc_str', '') or '')[:120]}
+                    for index in top if probabilities[index] > 0]}
         response = self._pack_response(chosen, msg_type, msg_args, player_id=snap.global_data.to_play)
         return CoreDecision(
             choice_id=sel_idx,
@@ -290,13 +305,27 @@ class AiBot:
                 else None
             ),
             available_choice_ids=available_choice_ids,
+            feedback=feedback,
         )
+
+    # 评测真实接收者可见状态，不切换到对手视角也不生成或提交动作
+    def get_state_evaluation_from_snapshot(self, snapshot, player):
+        if self.model_protocol_version != 4 or not self.model_available:
+            raise ValueError('旁路状态评测需要已加载的 V4 模型')
+        previous = self.encoder.last_online_report
+        try:
+            observation = self.encoder.encode_online(snapshot, player, state_evaluation=True)
+            values, predictions = self.inference_runtime.evaluate_state(observation)
+            return serialize_model_evaluation(values, predictions)
+        finally:
+            self.encoder.last_state_evaluation_report = self.encoder.last_online_report
+            self.encoder.last_online_report = previous
 
     # 计算基础动作概率供复杂宏动作候选池进行两阶段筛选
     def get_action_probabilities_from_snapshot(self, snap):
         if not self.model_available:
             raise RuntimeError("当前 AI 控制器未加载本地推理网络")
-        if not snap.valid_actions or not snap.entities:
+        if not snap.valid_actions or (not snap.entities and getattr(self, "model_protocol_version", None) != 4):
             return []
 
         if self.net is not None:

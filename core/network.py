@@ -254,6 +254,7 @@ class YgoNetClient:
         self._incoming = asyncio.Queue(maxsize=inbound_queue_size)
         self._receive_task = None
         self._dispatch_task = None
+        self._dispatch_stopped = False
 
     async def connect(self):
         try:
@@ -262,6 +263,7 @@ class YgoNetClient:
                 timeout=self.connect_timeout,
             )
             self.is_connected = True
+            self._dispatch_stopped = False
             _console_print(f"🔗 成功连接到服务器 {self.host}:{self.port}")
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._dispatch_task = asyncio.create_task(self._dispatch_loop())
@@ -322,7 +324,7 @@ class YgoNetClient:
     # 按网络接收顺序调用消息处理器并隔离收包任务
     async def _dispatch_loop(self):
         try:
-            while self.is_connected or not self._incoming.empty():
+            while not self._dispatch_stopped and (self.is_connected or not self._incoming.empty()):
                 incoming = await self._incoming.get()
                 if incoming is None:
                     self._incoming.task_done()
@@ -352,6 +354,7 @@ class YgoNetClient:
     # 关闭网络连接并回收后台收包任务
     async def close(self):
         self.is_connected = False
+        self._dispatch_stopped = True
         receive_task = self._receive_task
         dispatch_task = self._dispatch_task
         self._receive_task = None
@@ -367,6 +370,11 @@ class YgoNetClient:
                 tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 显式关闭后丢弃旧连接缓存，避免故障结束后仍触发决策或反复解析
+        while not self._incoming.empty():
+            self._incoming.get_nowait()
+            self._incoming.task_done()
 
         async with self._write_lock:
             writer = self.writer

@@ -15,6 +15,8 @@ const appState = {
   modelCatalog: null,
   assetStatus: null,
   observation: null,
+  feedback: null,
+  feedbackRefreshTimer: null,
   socket: null,
   socketReconnectTimer: null,
   pollingTimer: null,
@@ -34,6 +36,7 @@ const pageTitles = {
   assets: "运行资产",
   chat: "游戏聊天",
   observation: "LLM 观察",
+  feedback: "模型反馈",
   events: "事件与诊断",
 };
 
@@ -246,6 +249,9 @@ function toggleTheme() {
 function showPage(pageName) {
   const nextPage = pageTitles[pageName] ? pageName : "overview";
   appState.currentPage = nextPage;
+  if (nextPage === "feedback" && appState.authenticated) {
+    runAction(refreshFeedback, { silent: true });
+  }
   const panels = queryAll("[data-page-panel]");
   for (const panel of panels) {
     const active = panel.dataset.pagePanel === nextPage;
@@ -506,11 +512,16 @@ function renderStatus(status) {
   query("#rawStatusData").textContent = formatJson(status);
   const runtime = status?.runtime;
   const v4Diagnostics = status?.v4_observation_diagnostics || runtime?.core_model?.observation_diagnostics;
+  const compatibleInput = runtime?.core_model?.online_input;
   setText("#v4DiagnosticsSummary", !v4Diagnostics?.available
     ? "等待对局数据，V3 或仅 LLM 对局也可生成诊断"
     : v4Diagnostics.blocking_reasons?.includes("mapping_failed")
       ? "本局诊断尚未完成，可导出报告排查"
-      : `${v4Diagnostics.scope === "last_duel" ? "上一局" : "本局"}已映射 ${v4Diagnostics.mapped_groups} 类输入，${v4Diagnostics.missing_card_count} 张可见卡片仍缺实时属性`);
+      : compatibleInput?.ready
+        ? `V4 兼容输入已构建 · 转移历史已屏蔽 · ${compatibleInput.missing_dynamic_card_count || 0} 张可见卡片缺少部分实时属性`
+        : compatibleInput?.blocking_reasons?.length
+          ? `本次 V4 输入未就绪：${compatibleInput.blocking_reasons.join("、")}`
+          : `${v4Diagnostics.scope === "last_duel" ? "上一局" : "本局"}已映射 ${v4Diagnostics.mapped_groups} 类输入，${v4Diagnostics.missing_card_count} 张可见卡片仍缺实时属性`);
   const astrbot = status?.integrations?.astrbot || {};
   const activeAstrbot = (astrbot.clients || []).find((item) => item.connected);
   setText("#astrbotMetric", astrbot.connected ? "已连接" : "未连接");
@@ -663,7 +674,8 @@ function createDeckRecord(record, selectedDeck) {
   const meta = document.createElement("p");
   const badge = document.createElement("span");
   name.textContent = record.display_name || record.deck_ref;
-  meta.textContent = `${record.source?.filename || `${record.deck_ref}.ydk`} · ${new Date(Number(record.updated_at || 0) * 1000).toLocaleString("zh-CN")}`;
+  const sourceLabel = record.source?.origin === "gkg_package" ? `GKG：${record.source.package_name} / ${record.source.package_relative_path}` : record.source?.filename || `${record.deck_ref}.ydk`;
+  meta.textContent = `${sourceLabel} · ${new Date(Number(record.updated_at || 0) * 1000).toLocaleString("zh-CN")}`;
   badge.className = selected ? "status-pill is-success" : "tag";
   badge.textContent = selected ? "当前使用" : "本地";
   identity.append(name, meta);
@@ -1300,6 +1312,8 @@ function parseIntegerList(value) {
 function renderControls(controls) {
   appState.controls = controls;
   const intervention = controls?.baseline_intervention || controls?.intervention || {};
+  query("#feedbackEnabledInput").checked = intervention.core_feedback_enabled ?? true;
+  query("#feedbackPassiveInput").checked = intervention.core_feedback_passive_enabled ?? false;
   const autonomy = controls?.autonomy || {};
   const chat = controls?.game_chat || {};
   query("#modeInput").value = intervention.mode || "core_only";
@@ -1337,6 +1351,125 @@ function renderControls(controls) {
   query("#autoSendIntervalInput").value = chat.min_auto_send_interval ?? 15;
   setText("#revisionBadge", `revision ${controls?.revision ?? "—"}`);
   updateChatLength();
+}
+
+// 以百分比显示真实概率，缺失值保持空白而不是零
+function feedbackPercent(value) {
+  return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "—";
+}
+
+// 安全创建采样图节点，不将模型或服务器文本作为 HTML 执行
+function feedbackSvgNode(name, attributes, text) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attributes || {})) node.setAttribute(key, String(value));
+  if (text !== undefined) node.textContent = String(text);
+  return node;
+}
+
+// 绘制有界采样折线，缺失输出中断连线且不延长到未来状态
+function renderFeedbackChart(history) {
+  const host = query("#feedbackChart");
+  host.replaceChildren();
+  const choice = query("#feedbackMetricInput").value;
+  const probability = choice === "probability" || (choice === "auto" && history.some(point => Number.isFinite(point.probabilities?.win)));
+  const values = history.map(point => probability ? point.probabilities?.win : point.discounted_value);
+  const valid = values.filter(Number.isFinite);
+  host.classList.toggle("empty-state", !valid.length);
+  if (!valid.length) {
+    host.textContent = history.length ? "本次模型没有提供该指标，请切换为折扣价值" : "本局暂无模型采样";
+    return;
+  }
+  const svg = feedbackSvgNode("svg", { viewBox: "0 0 900 250", role: "img", "aria-label": probability ? "真实采样的胜利概率曲线" : "真实采样的折扣价值曲线" });
+  const low = probability ? 0 : Math.min(0, ...valid);
+  const high = probability ? 1 : Math.max(0, ...valid);
+  const span = high - low || 1;
+  for (let row = 0; row < 5; row += 1) {
+    const y = 20 + row * 47;
+    const tick = high - span * row / 4;
+    svg.append(feedbackSvgNode("line", { x1: 65, x2: 880, y1: y, y2: y, class: "feedback-axis" }));
+    svg.append(feedbackSvgNode("text", { x: 55, y: y + 4, "text-anchor": "end" }, probability ? feedbackPercent(tick) : tick.toFixed(2)));
+  }
+  let path = "";
+  let previousValid = false;
+  values.forEach((value, index) => {
+    if (!Number.isFinite(value)) { previousValid = false; return; }
+    const x = 65 + index / Math.max(1, values.length - 1) * 815;
+    const y = 20 + (high - value) / span * 188;
+    path += `${previousValid ? " L" : " M"}${x},${y}`;
+    previousValid = true;
+    const dot = feedbackSvgNode("circle", { cx: x, cy: y, r: 3.5, class: "feedback-point" });
+    dot.append(feedbackSvgNode("title", {}, `采样 ${index + 1} · 第 ${history[index].turn} 回合 · ${probability ? feedbackPercent(value) : value.toFixed(4)}`));
+    svg.append(dot);
+  });
+  svg.prepend(feedbackSvgNode("path", { d: path, class: "feedback-line" }));
+  svg.append(feedbackSvgNode("text", { x: 65, y: 237 }, `采样 1`));
+  svg.append(feedbackSvgNode("text", { x: 880, y: 237, "text-anchor": "end" }, `采样 ${history.length}`));
+  host.append(svg);
+}
+
+// 展示同一模型同一视角的真实预测，不把对手概率补成一减本方
+function renderFeedback(report) {
+  appState.feedback = report;
+  const latest = report?.latest;
+  setPill("#feedbackStatusBadge", !report?.enabled ? "反馈已关闭" : !latest ? "等待采样" : report.scope === "last_duel" ? "上局记录" : report.current ? "当前状态采样" : "最近采样 · 场面已更新", report.current ? "success" : "neutral");
+  setText("#feedbackWinValue", feedbackPercent(latest?.probabilities?.win));
+  setText("#feedbackOutcomeNote", latest?.probabilities ? `平局 ${feedbackPercent(latest.probabilities.draw)} · 失败 ${feedbackPercent(latest.probabilities.loss)}` : latest ? "未提供终局概率，不能由价值分数换算" : "等待模型终局输出");
+  setText("#feedbackCriticValue", Number.isFinite(latest?.discounted_value) ? latest.discounted_value.toFixed(4) : "—");
+  setText("#feedbackRemainingValue", Number.isFinite(latest?.remaining_events) ? `${latest.remaining_events_clipped ? "≥ " : ""}${latest.remaining_events.toFixed(1)}` : "—");
+  setText("#feedbackPolicyValue", feedbackPercent(latest?.policy?.confidence));
+  setText("#feedbackSampleNote", latest ? `${report.history.length} / ${report.capacity} 点 · ${formatTime(latest.sampled_at)} · 第 ${latest.turn} 回合 · 只含实际采样，非完整每帧预测` : "启动 V4 对局后会复用决策推理；也可开启持续旁路评测");
+  const details = query("#feedbackDetails");
+  details.replaceChildren();
+  for (const [label, value] of [
+    ["实际视角", latest ? `Core Player ${latest.perspective} · 本方可见` : "尚未绑定"],
+    ["采样来源", latest?.source === "decision_shared" ? "决策共用推理" : latest?.source === "passive" ? "独立旁路评测" : "—"],
+    ["推理后端", latest?.model?.inference_backend],
+    ["模型轮次", latest?.model?.iteration], ["状态序号", latest?.state_sequence],
+    ["采样时间", latest ? formatTime(latest.sampled_at) : "—"],
+  ]) {
+    const row = document.createElement("div");
+    const term = document.createElement("dt"); term.textContent = label;
+    const definition = document.createElement("dd"); definition.textContent = displayValue(value);
+    row.append(term, definition); details.append(row);
+  }
+  setText("#feedbackLimitNote", report?.last_error || "预测未经在线校准；使用本方可见信息与掩蔽历史。ONNX 未导出终局头时只显示价值，双方预测不能视作互补概率");
+  const actions = query("#feedbackActions");
+  actions.replaceChildren();
+  for (const item of latest?.policy?.top_actions || []) {
+    const row = document.createElement("div"); row.className = "feedback-action-row";
+    const label = document.createElement("span"); label.textContent = `选项 ${item.choice_id}${item.choice_id === latest.policy.selected_choice_id ? " · 所选" : ""}`;
+    if (item.description) { label.textContent += ` · ${item.description}`; label.title = item.description; }
+    const bar = document.createElement("progress"); bar.max = 1; bar.value = item.probability; bar.setAttribute("aria-label", label.textContent);
+    const value = document.createElement("strong"); value.textContent = feedbackPercent(item.probability);
+    row.append(label, bar, value); actions.append(row);
+  }
+  actions.classList.toggle("empty-state", !actions.childElementCount);
+  if (!actions.childElementCount) actions.textContent = "旁路状态评测不生成动作";
+  renderFeedbackChart(report?.history || []);
+}
+
+// 从共用只读接口拉取反馈，页面刷新不会触发模型运算
+async function refreshFeedback() {
+  if (!appState.authenticated) return null;
+  if (appState.capabilities && !appState.capabilities.model_feedback) {
+    renderFeedback(null);
+    setPill("#feedbackStatusBadge", "需要重启或更新 Link 服务", "neutral");
+    setText("#feedbackLimitNote", `当前运行的服务 ${appState.capabilities.link_version || ""} 尚未提供反馈接口。源码更新后需要退出并重启 Python 服务进程，停止对局不会重新加载代码`);
+    return null;
+  }
+  const report = await api("/model-feedback");
+  renderFeedback(report);
+  return report;
+}
+
+// 保存可离线修改的反馈开关，沿用统一控制接口及版本检查
+async function saveFeedbackControls() {
+  if (!appState.capabilities?.model_feedback) throw new Error("当前服务尚未提供模型反馈，请先重启更新后的 Link 服务");
+  await submitControlsPatch({ intervention: {
+    core_feedback_enabled: query("#feedbackEnabledInput").checked,
+    core_feedback_passive_enabled: query("#feedbackPassiveInput").checked,
+  } }, "模型反馈设置已保存");
+  await refreshFeedback();
 }
 
 // 获取最新运行时控制快照
@@ -1743,6 +1876,9 @@ function renderSelectedModel(catalog) {
     createModelTag(record.assets_available ? "语义资产就绪" : "缺少语义资产"),
     createModelTag(formatBytes(record.size_bytes)),
   );
+  if (record.online_inference_mode === "player_view_compatible_v1") {
+    metadata.append(createModelTag("V4 兼容在线 · 转移历史已屏蔽"));
+  }
   card.append(header, metadata);
   container.appendChild(card);
 }
@@ -1776,7 +1912,7 @@ function createModelRecord(record, selectedFilename) {
   const footer = document.createElement("footer");
   const assetState = document.createElement("span");
   const button = document.createElement("button");
-  assetState.textContent = !record.assets_available ? `缺少模型协议 V${record.model_protocol_version} 运行资产` : record.online_inference_ready === false ? "资产可用 · Link V4 在线适配待验收" : "配套语义资产可用";
+  assetState.textContent = !record.assets_available ? `缺少模型协议 V${record.model_protocol_version} 运行资产` : record.online_inference_mode === "player_view_compatible_v1" ? "V4 兼容在线可用 · 转移历史已屏蔽" : record.online_inference_ready === false ? "资产可用 · 在线推理不可用" : "配套语义资产可用";
   button.type = "button";
   button.className = selected ? "secondary-button" : "primary-button";
   button.textContent = selected ? "当前选择" : "选择模型";
@@ -2084,6 +2220,33 @@ function showImportedContent(imported) {
   }
 }
 
+// 检测包内卡组后请求明确选择，再建立不影响当前配置的本地副本
+async function offerPackageDeckImport(imported) {
+  const content = imported.content;
+  const decks = content?.files?.filter((item) => item.category === "decks") || [];
+  if (!decks.length || !content.archive_id) {
+    return;
+  }
+  const names = decks.slice(0, 8).map((item) => item.relative_path).join("\n");
+  const confirmed = window.confirm(`包内发现 ${decks.length} 副卡组，是否加入 Link 本地卡组仓库？\n${names}${decks.length > 8 ? "\n…" : ""}\n将保存到 decks/gkg_imports 独立目录，可查看、修改和选用；不会切换当前卡组，已有本地修改会保留`);
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const result = await api("/models/import-decks", { method: "POST", body: JSON.stringify({ archive_id: content.archive_id }) });
+    renderDeckCatalog(result.catalog);
+    await refreshConfiguration();
+    const details = result.skipped.map((item) => `${item.path}：${item.reason}`).join("；");
+    const label = query("#gkgFileLabel");
+    if (label) {
+      label.textContent = `包内卡组已处理：新增 ${result.installed.length} 副，保留已有 ${result.preserved.length} 副，跳过 ${result.skipped.length} 副${details ? `；${details}` : ""}`;
+    }
+    notify(`卡组入库完成：新增 ${result.installed.length} 副，保留 ${result.preserved.length} 副，跳过 ${result.skipped.length} 副`, result.skipped.length ? "warning" : undefined);
+  } catch (error) {
+    notify(`模型包已导入，但卡组入库失败：${error.message}`, "error");
+  }
+}
+
 // 上传并导入浏览器选择的 GKG 包
 async function importGkg(event) {
   event.preventDefault();
@@ -2107,6 +2270,7 @@ async function importGkg(event) {
     showImportedContent(result.imported);
     const warning = result.imported.warnings?.find((item) => item.warning);
     notify(`GKG 导入成功，共安装 ${result.imported.installed_files.length} 个新文件${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
+    await offerPackageDeckImport(result.imported);
   } finally {
     setButtonBusy("#importGkgButton", false);
   }
@@ -2133,6 +2297,7 @@ async function importLocalPackage() {
     showImportedContent(result.imported);
     const warning = result.imported.warnings?.find((item) => item.warning);
     notify(`本地 GKG 包 ${filename} 已导入${warning ? `；${warning.message}` : ""}`, warning ? "warning" : undefined);
+    await offerPackageDeckImport(result.imported);
   } finally {
     setButtonBusy("#importLocalPackageButton", false);
     renderLocalPackages(appState.modelCatalog?.packages);
@@ -2305,6 +2470,12 @@ function runScheduledRefresh() {
 // 根据事件类型刷新关联面板数据
 function reactToEvent(event) {
   const type = String(event?.event_type || "");
+  if (type === "model.feedback.updated" && appState.currentPage === "feedback" && !appState.feedbackRefreshTimer) {
+    appState.feedbackRefreshTimer = window.setTimeout(() => {
+      appState.feedbackRefreshTimer = null;
+      runAction(refreshFeedback, { silent: true });
+    }, 300);
+  }
   if (
     type === "runtime.controls.updated"
     || type === "service.controls.updated"
@@ -2432,6 +2603,7 @@ function startStatusPolling() {
 function pollStatus() {
   if (appState.authenticated && document.visibilityState !== "hidden") {
     runAction(refreshStatus, { silent: true });
+    if (appState.currentPage === "feedback") runAction(refreshFeedback, { silent: true });
   }
 }
 
@@ -2564,6 +2736,12 @@ function handleVisibilityChange() {
 
 // 为全部静态控件注册交互监听器
 function bindInterfaceEvents() {
+  query("#feedbackForm").addEventListener("submit", event => {
+    event.preventDefault();
+    runAction(saveFeedbackControls, {});
+  });
+  query("#refreshFeedbackButton").addEventListener("click", () => runAction(refreshFeedback, {}));
+  query("#feedbackMetricInput").addEventListener("change", () => renderFeedbackChart(appState.feedback?.history || []));
   const navItems = queryAll("[data-page]");
   for (const item of navItems) {
     item.addEventListener("click", handleNavigationClick);

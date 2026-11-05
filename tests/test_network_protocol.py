@@ -274,5 +274,25 @@ class NetworkConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, [(0x10, b"a"), (0x11, b"b")])
 
 
+    # 消息回调内主动关闭时必须停止旧队列，不能继续处理已经失效的消息
+    async def test_close_from_callback_discards_pending_frames(self):
+        received = []
+
+        # 模拟协议错误在顺序消息处理器内部触发关闭
+        async def callback(msg_type, msg_data):
+            received.append((msg_type, msg_data))
+            await client.close()
+
+        client = YgoNetClient("127.0.0.1", 7911, callback)
+        client.is_connected = True
+        for item in [(0x01, b"bad"), (0x01, b"stale"), None]:
+            client._incoming.put_nowait(item)
+        client._dispatch_task = asyncio.create_task(client._dispatch_loop())
+        await asyncio.wait_for(client._dispatch_task, timeout=1)
+        await asyncio.wait_for(client._incoming.join(), timeout=1)
+        self.assertEqual(received, [(0x01, b"bad")])
+        self.assertTrue(client._incoming.empty())
+
+
 if __name__ == "__main__":
     unittest.main()

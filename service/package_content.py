@@ -119,7 +119,7 @@ def reject_links(path):
 # 将已核验附件整体安装到内容隔离目录，重复导入复用原字节且不激活任何附件
 def install_content(stage_root, package_root, manifest, rows):
     if not rows:
-        return {"files": [], "archive_path": None, "presets_applied": False}
+        return {"files": [], "archive_path": None, "archive_id": None, "presets_applied": False}
     identity = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     group = f"{manifest['package_name']}-{hashlib.sha256(identity).hexdigest()[:16]}"
     parent = package_root / "imported"
@@ -151,4 +151,4 @@ def install_content(stage_root, package_root, manifest, rows):
                 shutil.copyfile(stage_root / row["path"], destination)
             (staged / "contents.json").write_text(provenance_text, encoding="utf-8")
             staged.rename(target)
-    return {"files": rows, "archive_path": f"./{target.relative_to(package_root.parent).as_posix()}", "presets_applied": False}
+    return {"files": rows, "archive_path": f"./{target.relative_to(package_root.parent).as_posix()}", "archive_id": group, "presets_applied": False}

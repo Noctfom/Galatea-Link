@@ -94,6 +94,8 @@ class DecisionConfig:
     force_llm_message_types: tuple[int, ...] = ()
     include_core_suggestion: bool = True
     core_time_budget: float = 5.0
+    core_feedback_enabled: bool = True
+    core_feedback_passive_enabled: bool = False
     llm_time_budget: float = 12.0
     autonomous_intervention_enabled: bool = False
     autonomous_allowed_modes: tuple[str, ...] = (
@@ -372,6 +374,8 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
             "decision.include_core_suggestion",
         ),
         core_time_budget=float(decision_raw.get("core_time_budget", 5.0)),
+        core_feedback_enabled=_as_bool(decision_raw.get("core_feedback_enabled", True), "decision.core_feedback_enabled"),
+        core_feedback_passive_enabled=_as_bool(decision_raw.get("core_feedback_passive_enabled", False), "decision.core_feedback_passive_enabled"),
         llm_time_budget=float(decision_raw.get("llm_time_budget", 12.0)),
         autonomous_intervention_enabled=_as_bool(
             decision_raw.get("autonomous_intervention_enabled", False),

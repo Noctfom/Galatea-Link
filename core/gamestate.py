@@ -25,14 +25,17 @@ from core.online_state import OnlineStateProjection, QUERY_FIELD_NAMES
 from core.response_history import OnlineResponseHistory, VisibleStateDigest
 from core.public_chain import PublicChainProgress
 from core.selection_protocol import SELECTION_MSGS, parse_selection_prompt, selection_context
-
-# Link 接收标准网络消息流且不解析 Core 本地缓冲区的幽灵字节
-CORE_HAS_GHOST_BYTE = False
+from core.confirmation_protocol import confirmation_payload_length, parse_online_confirmation
+from core.chain_protocol import chain_payload_length, parse_online_chain
+from core.reload_protocol import reload_payload_length, parse_online_reload
 
 INTERACTION_MESSAGE_TYPES = frozenset({
     10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     140, 141, 142, 143,
 })
+
+# 辅助提示可以补充元数据，但不替换仍然挂起的操作菜单
+AUXILIARY_MESSAGE_TYPES = frozenset({2, 30, 31, 42, 160, 163, 164, 165})
 
 INTERACTION_MIN_PAYLOAD_LENGTHS = {
     10: 5,
@@ -178,16 +181,7 @@ class MessageParser:
 
             # 16: SELECT_CHAIN
             elif msg_type == 16:
-                stream.read(1); length += 1 # P
-                b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
-                
-                # 修复 1：MDPro 砍掉了 Spe，头部只剩 Forced(1) + Hint1(4) + Hint2(4) = 9 字节
-                stream.read(9); length += 9 
-                
-                # 修复 2：移除定界符，严格按照 13 字节读取每个 Option
-                # 每个连锁选项包含：flag(1), code(4), loc(1), seq(1), pos(1), desc(4), effect_id(1) = 13 字节
-                stream.read(count * 13); length += count * 13
+                length = chain_payload_length(stream.read())
 
             # 18/24: PLACE / DISFIELD
             elif msg_type in [18, 24]:
@@ -243,12 +237,7 @@ class MessageParser:
 
             # 31: CONFIRM_CARDS
             elif msg_type == 31:
-                stream.read(1); length += 1 # P
-                if CORE_HAS_GHOST_BYTE:
-                    stream.read(1); length += 1
-                b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
-                stream.read(count * 7); length += count * 7
+                length = confirmation_payload_length(stream.getvalue()[start_pos:])
 
             # 36: SHUFFLE_SET_CARD
             elif msg_type == 36:
@@ -288,23 +277,7 @@ class MessageParser:
 
             # 162: RELOAD_FIELD
             elif msg_type == 162:
-                b = stream.read(1); length += 1
-                rule = struct.unpack('B', b)[0]
-                mzone_size = 7 if rule >= 4 else 5
-                for _ in range(2):
-                    stream.read(4); length += 4 
-                    for _ in range(mzone_size):
-                        b = stream.read(1); length += 1
-                        if struct.unpack('B', b)[0] != 0:
-                            stream.read(2); length += 2 
-                    for _ in range(8):
-                        b = stream.read(1); length += 1
-                        if struct.unpack('B', b)[0] != 0:
-                            stream.read(1); length += 1 
-                    stream.read(6); length += 6 
-                b = stream.read(1); length += 1
-                chain_size = struct.unpack('B', b)[0]
-                stream.read(chain_size * 15); length += chain_size * 15
+                length = reload_payload_length(stream.read())
 
             # 163/164: STRING MESSAGES
             elif msg_type in [163, 164]:
@@ -514,13 +487,21 @@ class DuelState:
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
+        if msg_type == 2:
+            # 纯提示不会替换操作菜单，宽提示数据也不作为新的状态字段猜测解析
+            return
         if msg_type == 4:
             start = self.online_projection.start(msg_payload)
+            if start is None:
+                return
             self.response_history.bind(start["perspective"])
             self.my_lp, self.op_lp = start["lp"]
             return
         if msg_type in (6, 7):
             self._apply_online_query(msg_type, msg_payload)
+            return
+        if msg_type == 162:
+            self._restore_online_field(parse_online_reload(msg_payload))
             return
         if msg_type in INTERACTION_MESSAGE_TYPES and self.online_projection.started:
             if get_interaction_player_id(msg_type, msg_payload) != self.online_projection.perspective:
@@ -543,14 +524,8 @@ class DuelState:
             
             # --- 状态维护 ---
             if msg_type in [30, 31, 42]:
-                stream.read(1) # P
-                if msg_type == 31 and CORE_HAS_GHOST_BYTE:
-                    stream.read(1)
-                count = struct.unpack('B', stream.read(1))[0]
-                for _ in range(count):
-                    code = struct.unpack('<I', stream.read(4))[0]
-                    stream.read(3) # c, l, s
-                    self.recently_confirmed.append(code & 0x7FFFFFFF)
+                confirmation = parse_online_confirmation(msg_type, msg_payload)
+                self.recently_confirmed.extend(card["code"] & 0x7FFFFFFF for card in confirmation["cards"])
 
             elif msg_type == 50: # MSG_MOVE (完美兼容超量素材)
                 code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
@@ -784,7 +759,7 @@ class DuelState:
                 self._bind_action_effect_slots()
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
-            elif msg_type != 1: 
+            elif msg_type != 1 and msg_type not in AUXILIARY_MESSAGE_TYPES:
                 self.current_valid_actions = []
             self.response_history.observe(msg_type, msg_payload, self.history_digest(),
                 interaction=msg_type in INTERACTION_MESSAGE_TYPES and not (msg_type == 16 and len(msg_payload) == 11 and msg_payload[1] == 0))
@@ -793,6 +768,51 @@ class DuelState:
             print(f"⚠️ [GameState] update消息解析失败: {e}")
             # 抛出异常，击毙这局烂尾游戏
             raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+
+    # 原子重建快照可证明的占位和连锁，清除旧实例身份及未完成动作
+    def _restore_online_field(self, restored):
+        if not self.online_projection.started:
+            self.online_projection.warn_compatibility("reload_before_start")
+            return
+        new_field = {0: defaultdict(dict), 1: defaultdict(dict)}
+        facts = {}
+        for player, data in enumerate(restored['players']):
+            for zone, cards in ((Zone.MZONE, data['monsters']), (Zone.SZONE, data['spells'])):
+                for sequence, position, overlays in cards:
+                    fields = {'position': position}
+                    if zone == Zone.MZONE:
+                        fields['overlay_codes'] = [0] * overlays
+                    facts[(player, zone, sequence)] = fields
+            for zone, count in zip((Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA), data['counts'][1:5]):
+                for sequence in range(count):
+                    facts[(player, zone, sequence)] = {}
+        for (player, zone, sequence), fields in facts.items():
+            new_field[player][zone][sequence] = {'code': 0, 'pos': fields.get('position', 0),
+                'owner': player, 'overlays': list(fields.get('overlay_codes', ())),
+                'online_query_fields': tuple(sorted(fields)), 'query_inventory': zone == Zone.EXTRA,
+                'query_sequence': self.online_projection.sequence + 1, 'state_source': 'reload_field'}
+        chains = []
+        for index, (code, raw, player, zone, sequence, desc) in enumerate(restored['chains'], 1):
+            if player not in (0, 1):
+                self.online_projection.warn_compatibility('reload_chain_player', index=index, player=player)
+                continue
+            handler_c, handler_l, handler_s, handler_p = LocationInfo.decode(raw)
+            slot = self.effect_slot_resolver(code & 0x7FFFFFFF, desc)
+            chains.append({'code': code & 0x7FFFFFFF, 'hc': handler_c, 'hl': handler_l,
+                'hs': handler_s, 'hp': handler_p, 'c': player, 'l': zone, 's': sequence,
+                'desc': desc, 'effect_slot': slot if slot is not None else -1, 'ct': index})
+        self.online_projection.restore_field(restored, facts)
+        self.field_map, self.chain_stack = new_field, chains
+        self.my_lp, self.op_lp = (data['lp'] for data in restored['players'])
+        self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []}
+        self.recently_confirmed = []
+        self.p0_deck, self.p1_deck, self.p0_extra, self.p1_extra = [], [], [], []
+        self.current_valid_actions = []
+        self._selection_prompt = None
+        self._action_prompt_type = None
+        self.response_history.invalidate()
+        self.public_chain_progress.restore(chains)
 
     # 固定本方初始构筑并与动态剩余库存分离
     def set_own_deck(self, player, main, extra):
@@ -1089,17 +1109,18 @@ class DuelState:
 
             # 2. MSG_SELECT_CHAIN (16)
             elif msg_type == 16:
-                player = struct.unpack('B', stream.read(1))[0]
-                count = struct.unpack('B', stream.read(1))[0]
-                forced = struct.unpack('B', stream.read(1))[0]
-                hint_timing = struct.unpack('<I', stream.read(4))[0]
-                opponent_hint_timing = struct.unpack('<I', stream.read(4))[0]
-                
-                for i in range(count):
-                    effect_flag = struct.unpack('B', stream.read(1))[0]
-                    code = struct.unpack('<I', stream.read(4))[0]
-                    loc_val = struct.unpack('<I', stream.read(4))[0]
-                    desc = struct.unpack('<I', stream.read(4))[0]
+                prompt = parse_online_chain(stream.read())
+                count = len(prompt['candidates'])
+                hint_timing = prompt['hint_timing']
+                opponent_hint_timing = prompt['opponent_hint_timing']
+                if prompt['entry_size'] is not None and self.online_projection.chain_entry_size != prompt['entry_size']:
+                    self.online_projection.chain_entry_size = prompt['entry_size']
+                    self.online_projection.warn_compatibility('chain_layout_selected', entry_size=prompt['entry_size'])
+
+                for i, candidate in enumerate(prompt['candidates']):
+                    code = candidate['code']
+                    loc_val = candidate['location']
+                    desc = candidate['desc']
                     
                     act = GameAction(
                         action_type=16,
@@ -1113,14 +1134,15 @@ class DuelState:
                         target_location_raw=loc_val,
                         selection_count=count,
                         cancelable=False,
-                        prompt_flags=(effect_flag & 0xFF) | ((forced & 0xFF) << 8),
+                        context_value=prompt['special_count'],
+                        prompt_flags=candidate['effect_mode'] | (int(candidate['forced']) << 8),
                         prompt_value=hint_timing,
                         prompt_value2=opponent_hint_timing,
                     )
                     self.current_valid_actions.append(act)
                     
-                # 只有非强制发动 (forced == 0) 时，才允许 AI 取消
-                if not forced:
+                # 所有候选均非强制时才提供取消，特殊候选数不作为强制标志
+                if not prompt['forced']:
                     for action in self.current_valid_actions:
                         action.cancelable = True
                     self.current_valid_actions.append(GameAction(
@@ -1130,6 +1152,7 @@ class DuelState:
                         operation_id=int(ActionOperation.CANCEL),
                         selection_count=count,
                         cancelable=True,
+                        context_value=prompt['special_count'],
                         prompt_value=hint_timing,
                         prompt_value2=opponent_hint_timing,
                     ))
@@ -1704,7 +1727,10 @@ class DuelState:
 
     # 原子应用服务器查询且不创建动作或改变决策归属
     def _apply_online_query(self, msg_type, payload):
-        actor, zone, changes = self.online_projection.refresh(msg_type, payload)
+        refreshed = self.online_projection.refresh(msg_type, payload)
+        if refreshed is None:
+            return
+        actor, zone, changes = refreshed
         if zone == Zone.DECK:
             return
         previous = self.field_map[actor].get(zone, {})
@@ -1856,6 +1882,7 @@ class DuelState:
                     entities[-1].query_known_fields = info.get('online_query_fields')
                     entities[-1].query_sequence = info.get('query_sequence')
                     entities[-1].query_invalidated = bool(info.get('query_invalidated'))
+                    entities[-1].state_source = info.get('state_source', 'server_query')
                     entities[-1].query_inventory = bool(info.get('query_inventory'))
                     entities[-1].relation_known_fields = info.get('relation_known_fields', ())
                     for name in ('current_code', 'original_owner', 'current_rank', 'link_rating', 'status_mask', 'is_equip_source', 'is_disabled', 'is_forbidden', 'properly_summoned', 'counter_items', 'reason'):

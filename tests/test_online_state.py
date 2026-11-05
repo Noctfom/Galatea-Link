@@ -13,6 +13,7 @@ from core.observation import LlmObservationBuilder
 from core.parser import OCGParser, OCGParseError
 from data_types import GameAction
 from galatea_link import GalateaLink
+from tests.online_server_fixtures import server_query_row
 
 
 # 构造完整 BO1 Start 载荷
@@ -64,6 +65,74 @@ def test_query_zero_level_and_missing_defense_reach_llm():
     assert card["current_atk"] == 0 and card["level"] == 0
     assert "current_def" not in card
     assert card["dynamic_state_source"] == "server_query"
+
+
+# 真实服务器隐藏查询行保留原长度和占位，不能保留已知身份或吞掉下一行
+@pytest.mark.parametrize("mode", [None, "replace", "merge"])
+def test_redacted_query_row_preserves_occupancy_and_clears_old_fields(mode):
+    view = OnlineStateProjection(query_mode=mode)
+    view.start(start_payload())
+    view.refresh(7, bytes([0, 4, 0]) + query_row())
+    redacted = struct.pack("<I", 80) + bytes(76)
+    payload = bytes([0, 4]) + redacted + struct.pack("<I", 4) * 6
+    view.refresh(6, payload)
+    assert (0, 4, 0) in view.cards and view.counts[(0, 4)] == 1
+    assert set(view.cards[(0, 4, 0)]) == {"query_sequence"}
+    with pytest.raises(q.CoreQueryError):
+        q.parse_legacy_card_query(redacted)
+    view.refresh(7, bytes([0, 4, 0]) + redacted[:-1] + b"\x01")
+    assert set(view.cards[(0, 4, 0)]) == {"query_sequence"}
+    assert view.compatibility_warning_counts["query_extra_bytes"] == 1
+
+
+# 服务端会回传请求掩码内无载荷的历史保留位，不能把本地查询字段集用作网络白名单
+@pytest.mark.parametrize("flags,size", [(0x781FFF, 72), (0x181FFF, 64), (0xF81FFF, 80)])
+@pytest.mark.parametrize("player", [0, 1])
+def test_standard_server_query_masks_are_accepted(flags, size, player):
+    state = DuelState(model_protocol_version=4)
+    state.update(4, start_payload(player))
+    row = server_query_row(player, flags=flags)
+    assert len(row) == size
+    rows = b"".join(server_query_row(player, index=index, flags=flags) for index in range(5))
+    state.update(6, bytes([player, 2]) + rows)
+    snapshot = state.get_snapshot()
+    assert len(state.field_map[player][2]) == 5
+    assert state.field_map[player][2][0]["code"] == 14558127
+    assert state.field_map[player][2][0]["current_atk"] == 2500
+    assert snapshot.online_coverage["started"]
+
+
+# 历史位不携带公开性信息，不能靠该位揭示对手隐藏身份
+def test_server_reserved_bit_never_reveals_hidden_cards():
+    view = OnlineStateProjection(query_mode="merge")
+    view.start(start_payload())
+    view.refresh(7, bytes([1, 2, 0]) + server_query_row(1, code=89631139))
+    assert set(view.cards[(1, 2, 0)]) == {"position", "query_sequence"}
+    assert q.PUBLIC_CARD_QUERY_FLAGS & 0x100000 == 0
+
+
+# 行边界完整时未知字段和附加数据只警告，单行字段截断降级未知占位
+@pytest.mark.parametrize("failure", ["unsupported_flag", "extra_payload", "truncated_payload"])
+def test_server_query_variations_warn_without_ending_the_duel(failure, caplog):
+    view = OnlineStateProjection()
+    view.start(start_payload())
+    row = bytearray(server_query_row())
+    if failure == "unsupported_flag":
+        struct.pack_into("<I", row, 4, 0x1781FFF)
+    elif failure == "extra_payload":
+        row += struct.pack("<I", 1)
+        struct.pack_into("<I", row, 0, len(row))
+    else:
+        del row[-4:]
+        struct.pack_into("<I", row, 0, len(row))
+    view.refresh(7, bytes([0, 2, 0]) + row)
+    warning = {"unsupported_flag": "query_unknown_flags", "extra_payload": "query_extra_bytes", "truncated_payload": "query_row_unparsed"}[failure]
+    assert view.compatibility_warning_counts[warning] == 1
+    assert "query_flags" in caplog.text and "row_bytes" in caplog.text and "row_index" in caplog.text
+    assert "14558127" not in caplog.text
+    assert (0, 2, 0) in view.cards
+    if failure == "truncated_payload":
+        assert set(view.cards[(0, 2, 0)]) == {"query_sequence"}
 
 
 # 验证完整区域刷新删除旧槽位且不会制造新动作
@@ -133,11 +202,11 @@ async def test_query_packet_never_reschedules_pending_decision(kind):
     assert not link._publish_event.called
 
 
-# 拒绝缺失开局基线的刷新且不产生推测座位
-def test_query_before_start_is_rejected():
+# 缺失开局基线时忽略辅助刷新并记录警告，不产生推测座位
+def test_query_before_start_is_ignored():
     view = OnlineStateProjection()
-    with pytest.raises(ValueError, match="Start"):
-        view.refresh(7, bytes([0, 4, 0]) + query_row())
+    assert view.refresh(7, bytes([0, 4, 0]) + query_row()) is None
+    assert view.compatibility_warning_counts["query_before_start"] == 1
     assert view.cards == {} and view.perspective is None
 
 

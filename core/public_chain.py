@@ -25,6 +25,14 @@ class PublicChainProgress:
         self.current[number] = item
         self.recent.appendleft(item)
 
+    # 恢复快照声明的当前连锁，不把未知的发动和结算过程写入近期历史
+    def restore(self, records):
+        self.current = {item["ct"]: {**item, "stage": "snapshot", "chain_ended": False,
+            "activation_negated_observed": False, "effect_disabled_observed": False,
+            "resolution_observed": False} for item in records}
+        self.recent.clear()
+        self.observed = True
+
     # 分开处理发动确认、结算和两类无效通知，不从未收到的消息推断效果成功
     def observe(self, kind, number=None):
         if kind == 74:

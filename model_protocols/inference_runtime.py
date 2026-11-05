@@ -47,6 +47,27 @@ class PyTorchInferenceRuntime:
             value_input,
         )
 
+    # 在同一次前向中读取 V4 终局头，旧网络继续返回其实际价值输出
+    def infer_with_evaluation(self, observation):
+        import torch
+        if not callable(getattr(self.net, 'evaluate_state', None)):
+            return (*self.infer(observation), None)
+        with torch.no_grad():
+            inputs = {key: (value if hasattr(value, 'to') else torch.from_numpy(np.ascontiguousarray(value))).to(self.device)
+                for key, value in observation.items()}
+            logits, values, state, predictions = self.net(inputs, return_evaluation=True)
+        return logits.detach().cpu().numpy(), values.detach().cpu().numpy(), state, {
+            key: value.detach().cpu().numpy() for key, value in predictions.items()}
+
+    # 只运行状态主干和终局头，不要求候选也不进行动作采样
+    def evaluate_state(self, observation):
+        import torch
+        with torch.no_grad():
+            inputs = {key: (value if hasattr(value, 'to') else torch.from_numpy(np.ascontiguousarray(value))).to(self.device)
+                for key, value in observation.items()}
+            values, _, predictions = self.net.evaluate_state(inputs)
+        return values.detach().cpu().numpy(), {key: value.detach().cpu().numpy() for key, value in predictions.items()}
+
 
 class OnnxInferenceRuntime:
     # 初始化受控执行提供器和固定输入签名的 ONNX 会话
@@ -105,7 +126,8 @@ class OnnxInferenceRuntime:
     def infer(
         self,
         observation: Mapping[str, Any],
-    ) -> tuple[np.ndarray, np.ndarray, None]:
+        *, evaluation=False,
+    ):
         missing = [name for name in self.input_names if name not in observation]
         unexpected = sorted(set(observation).difference(self.input_names))
         if missing or unexpected:
@@ -128,5 +150,21 @@ class OnnxInferenceRuntime:
                 "ONNX 输出签名不匹配 "
                 f"expected={output_names} actual={list(self.output_names)}"
             )
-        logits, values = self.session.run(output_names, feed)
-        return np.asarray(logits), np.asarray(values), None
+        extra_names = ['terminal_outcome_logits', 'terminal_remaining']
+        if evaluation and set(extra_names).issubset(self.output_names):
+            output_names += extra_names
+        outputs = self.session.run(output_names, feed)
+        result = np.asarray(outputs[0]), np.asarray(outputs[1]), None
+        if evaluation:
+            predictions = dict(zip(extra_names, outputs[2:])) if len(outputs) == 4 else None
+            return (*result, predictions)
+        return result
+
+    # 使用图内已导出的终局头，旧双输出图保持价值可用但不虚构胜率
+    def infer_with_evaluation(self, observation):
+        return self.infer(observation, evaluation=True)
+
+    # 无候选场面只读取价值和已导出预测，忽略动作输出
+    def evaluate_state(self, observation):
+        _, values, _, predictions = self.infer_with_evaluation(observation)
+        return values, predictions

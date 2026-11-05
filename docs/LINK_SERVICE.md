@@ -12,12 +12,18 @@ YGOPro 兼容客户端 ── YGOPro 协议 ── Link 服务 ── HTTP/WebSo
 
 三类版本彼此独立
 
-- Link 软件版本当前为 `3.2.0`
+- Link 软件版本由根目录 `link_version.py` 统一声明
 - 游戏网络层面向 YGOPro 协议，可连接采用兼容协议的客户端与服务端
-- 模型协议当前首个稳定版本为 V3，已知 Core 3.6.3 至 3.6.5 产生兼容制品
+- 模型适配分别支持 V3 和 V4，按模型协议识别，独立于 Core 框架软件版本
 - 外部接口固定为 `galatea.link.api.v1`
 
-以后新增 V4 模型适配器时，只替换 Link 内部编码和推理层。只要外部能力没有本质增加，AstrBot、WebUI 和移动客户端不需要跟随模型协议升级
+V4 已接入 Link 内部编码和推理层。只要外部能力没有本质增加，AstrBot、WebUI 和移动客户端不需要跟随模型协议升级
+
+3.3.16 的 Type162 玩家场面重建继续使用 API v1，只增加可选观察和能力信息。近期 Link 解析更新不强制要求插件同步升级，完整范围及后续插件方案见 [升级兼容说明](INTEGRATION_COMPATIBILITY.md)
+
+更新 Link 源码后需要重启整个服务进程，`POST /api/v1/session/stop` 和 WebUI 停止对局不会重新加载 Python 模块。重启后通过启动横幅或 `GET /api/v1/health` 的 `version` 核对实际运行版本
+
+3.3.12 起在线状态刷新采用兼容优先策略，可跳过的附加数据和元数据差异保存为警告，具体边界见 [在线兼容策略](CORE_V4_ONLINE_CONTRACT.md#link-在线兼容策略)。日志位于数据目录的 `logs/protocol_warnings.log`，使用有限大小轮转，不需要额外开关
 
 ## 启动
 
@@ -90,6 +96,7 @@ galatea_link:
 - `GET /api/v1/health` 无需鉴权且不会加载模型
 - `GET /api/v1/capabilities` 返回 API、稳定 V3、预览 V4、YGOPro 和推理后端能力
 - `GET /api/v1/status` 返回脱敏会话状态
+- `GET /api/v1/model-feedback` 读取当前局或上局的模型反馈与有界曲线，不触发推理；含义见 [模型反馈](MODEL_FEEDBACK.md)
 - `GET /api/v1/controls` 返回宏观控制和 revision
 - `GET /api/v1/configuration` 返回脱敏的 YGOPro、Agent、LLM 和服务配置
 - `GET /api/v1/models` 返回模型仓库、当前选择和本地 GKG 列表
@@ -113,6 +120,7 @@ galatea_link:
 - `PATCH /api/v1/models/selection` 保存下次会话使用的模型
 - `POST /api/v1/models/import` 流式上传并导入 GKG
 - `POST /api/v1/models/import-local` 导入 `deploy_packages` 中的 GKG
+- `POST /api/v1/models/import-decks` 将已归档 GKG 的卡组显式复制到本地独立目录，参数及来源规则见 [GKG 导入](GKG_IMPORT.md#外部接口)
 - `POST /api/v1/assets/card-data/sync` 同步并校验 Link 自有 CDB 与 YGOPro Lua 脚本
 - `POST /api/v1/assets/semantics/sync` 同步并交叉校验已发布的完整 V3 语义资产
 - `POST /api/v1/assets/semantics/rebuild` 在完整环境中解析 Lua 并增量或全量生成 V3 语义资产
@@ -142,7 +150,7 @@ galatea_link:
 
 3.3.2 在模型仓库增加“V4 在线接入检查”。用 V3 或仅 LLM 模式对局后即可导出当前或最近一局的结构报告；停止会话仍可导出，重启服务后清除。报告只含覆盖计数和字段缺口，不含卡密、卡组、响应字节或密钥，也不会自动发送给 LLM。诊断映射不开放 V4 在线推理，详细边界见 [V4 接入说明](V4_ADAPTER.md)
 
-3.3.3 在决策策略中增加“Core 闭环回退”开关和阈值，默认为启用、累计 5 次，均可离线保存或通过统一控制 API 调整。说明按钮解释触发条件，完整语义见 [运行时控制文档](RUNTIME_API.md#core-闭环回退)。V4 ONNX 遇到外部词表追加或语义内容演进时，导入成功并提示旧图知识滞后，不要求 Link 重导出；原图、模型 UUID、图内身份和在线推理限制保持不变
+3.3.3 在决策策略中增加“Core 闭环回退”开关和阈值，默认为启用、累计 5 次，均可离线保存或通过统一控制 API 调整。说明按钮解释触发条件，完整语义见 [运行时控制文档](RUNTIME_API.md#core-闭环回退)。V4 ONNX 遇到外部词表追加或语义内容演进时，导入成功并提示旧图知识滞后，不要求 Link 重导出；原图、模型 UUID 和图内身份保持不变。3.3.9 起 V4 可直接参与兼容在线决策，无法对齐的转移历史默认屏蔽
 
 策略、模型选择和配置中心不要求游戏会话已经启动。Link 会把这些非敏感覆盖写入忽略版本控制的 `link_state.json`，不会把 LLM 密钥、服务器密码或服务令牌写入该文件。运行中的配置和模型选择在下一次会话启动时生效；TCP 测试只连接并立即关闭，不加入房间
 

@@ -1,4 +1,4 @@
-# V4 检查点和 ONNX 运行时接入，严格验证身份并保留在线观测门禁
+# V4 检查点和 ONNX 运行时接入，严格验证身份并支持玩家观测兼容推理
 
 from pathlib import Path
 import uuid
@@ -106,13 +106,18 @@ def resolve_asset_directory(path, asset_path, model_id=None):
     raise FileNotFoundError("找不到 V4 精确词表及编译语义资产，请导入 GKG4 或指定 assets_path")
 
 
-# 构建已加载但尚未开放在线推理的协议元数据
+# 公布兼容在线能力与历史输入策略，完整原生观测资格单独保留
 def public_metadata(inspected, assets, runtime):
     metadata = {**inspected, "adapter_id": ADAPTER_ID, "assets_verified": True,
             "inference_backend": runtime.runtime_id, "offline_inference_ready": True,
-            "online_inference_ready": False,
+            "online_inference_ready": True,
+            "online_inference_mode": "player_view_compatible_v1",
+            "online_history_policy": "masked_unavailable",
+            "native_online_observation_complete": False,
+            "spectator_evaluation_supported": False,
             "runtime_asset_identity": dict(assets.identity),
-            "online_block_reason": "Link V4 在线历史、动态状态和编码对照尚未完成，当前仅接受完整离线 V4 快照"}
+            "online_block_reason": None,
+            "online_warning": "V4 使用玩家可见状态兼容推理，无法对齐的转移历史已屏蔽，策略质量待真实对局验证"}
     if runtime.runtime_id == "onnxruntime":
         metadata["asset_compatibility"] = assets.onnx_compatibility(inspected)
     elif inspected["semantic_lookup_hash"] != assets.lookup.prefix_hash(inspected["semantic_lookup_card_count"]):

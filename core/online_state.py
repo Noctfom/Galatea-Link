@@ -7,10 +7,15 @@ import struct
 
 from core import query_protocol as q
 from core.public_context import OnlinePublicContext, card_hint_has_host, location_key
+from core.protocol_warnings import LOGGER
+from core.confirmation_protocol import parse_online_confirmation
 from game_constants import LocationInfo, Zone
 
 
 ZONES = {1, 2, 4, 8, 16, 32, 64}
+# 传统服务器会回传请求掩码中的此历史位，但 get_infos 不为它序列化字段
+LEGACY_SERVER_RESERVED_QUERY_FLAGS = 0x100000
+SERVER_CARD_QUERY_FLAGS = q.PUBLIC_CARD_QUERY_FLAGS | LEGACY_SERVER_RESERVED_QUERY_FLAGS
 QUERY_FIELD_NAMES = {
     q.QUERY_CODE: ("code",), q.QUERY_POSITION: ("position",),
     q.QUERY_ALIAS: ("current_code",), q.QUERY_TYPE: ("current_type",),
@@ -48,16 +53,33 @@ class OnlineStateProjection:
         self.public_message_counts = {120: 0, 160: 0, 165: 0}
         self.last_known_draws = ()
         self.invalidated_locations = ()
+        self.compatibility_warning_counts = {}
+        self.compatibility_warnings = deque(maxlen=16)
+        self.confirmation_header_size = None
+        self.chain_entry_size = None
+        self.field_rebuilds = 0
+        self.last_field_rebuild = None
+
+    # 记录可兼容差异并限制重复日志数量，不包含卡号聊天或原始载荷
+    def warn_compatibility(self, code, **details):
+        count = self.compatibility_warning_counts.get(code, 0) + 1
+        self.compatibility_warning_counts[code] = count
+        self.compatibility_warnings.append({"code": code, "occurrences": count, **details})
+        if count <= 3 or count % 100 == 0:
+            LOGGER.warning("在线协议兼容警告 %s count=%s %s", code, count, details)
 
     # 严格读取 Start 的座位生命值及区域数量
     def start(self, payload):
         if self.started:
-            raise ValueError("同一对局不接受重复 Start")
+            self.warn_compatibility("start_repeated")
+            return None
         if len(payload) != 18:
             raise ValueError(f"在线 Start 载荷必须为 18 字节，实际 {len(payload)}")
         player, rule, lp0, lp1, main0, extra0, main1, extra1 = struct.unpack("<BBIIHHHH", payload)
-        if player not in (0, 1) or any(count > 256 for count in (main0, extra0, main1, extra1)):
-            raise ValueError("在线 Start 座位或卡组数量无效")
+        if player not in (0, 1):
+            raise ValueError("在线 Start 玩家视角无效")
+        if any(count > 256 for count in (main0, extra0, main1, extra1)):
+            self.warn_compatibility("start_large_deck_counts", counts=(main0, extra0, main1, extra1))
         self.perspective = player
         self.cards.clear()
         self.counts = {(0, 1): main0, (0, 64): extra0, (1, 1): main1, (1, 64): extra1}
@@ -66,21 +88,37 @@ class OnlineStateProjection:
         self.sequence += 1
         return {"perspective": player, "rule": rule, "lp": (lp0, lp1)}
 
-    # 验证完整查询行集合且拒绝不支持的查询位或尾部残渣
-    def _rows(self, data):
+    # 按行头确定记录边界，兼容未知附加字段且只解析已知字段
+    def _rows(self, data, *, source=None):
         rows, offset = [], 0
         while offset < len(data):
             if len(data) - offset < 4:
                 raise ValueError("在线查询行头截断")
             size = struct.unpack_from("<I", data, offset)[0]
-            if (size != 4 and not 8 <= size <= 8192) or offset + size > len(data) or len(rows) >= 256:
-                raise ValueError("在线查询行长度或数量无效")
+            if (size != 4 and size < 8) or offset + size > len(data):
+                raise ValueError(f"在线查询行长度无效或截断: row_index={len(rows)} row_bytes={size} remaining_bytes={len(data) - offset}")
             if size == 4:
                 rows.append(None)
+            elif size > 8 and not any(data[offset + 4:offset + size]):
+                # YGOPro 将不可见查询行的长度头之后全部清零，保留占位并清除旧字段
+                rows.append({"query_flags": 0, "redacted": True})
             else:
-                row = q.parse_legacy_card_query(data[offset:offset + size])
-                if row["query_flags"] & ~q.PUBLIC_CARD_QUERY_FLAGS:
-                    raise ValueError("在线查询包含未知布局字段，需明确新的服务器报文配置")
+                flags = struct.unpack_from("<I", data, offset + 4)[0]
+                unsupported = flags & ~SERVER_CARD_QUERY_FLAGS
+                details = {**(source or {}), "row_index": len(rows), "row_bytes": size, "query_flags": f"0x{flags:08X}"}
+                if unsupported:
+                    self.warn_compatibility("query_unknown_flags", **details, unsupported_flags=f"0x{unsupported:08X}")
+                try:
+                    row = q.parse_legacy_card_query(data[offset:offset + size], allow_trailing_data=True)
+                except q.CoreQueryError:
+                    # 查询记录已有独立边界，字段无法解码时保留未知占位而不结束对局
+                    self.warn_compatibility("query_row_unparsed", **details)
+                    row = {"query_flags": 0, "redacted": True}
+                else:
+                    if row["query_trailing_bytes"]:
+                        self.warn_compatibility("query_extra_bytes", **details, ignored_bytes=row["query_trailing_bytes"])
+                    if flags == 0 or flags & q.QUERY_CODE and row["code"] == 0:
+                        row["redacted"] = True
                 rows.append(row)
             offset += size
         return rows
@@ -88,23 +126,30 @@ class OnlineStateProjection:
     # 将刷新映射为有来源的公开字段并在整包验证后更新状态
     def refresh(self, kind, payload):
         if not self.started:
-            raise ValueError("在线查询刷新必须在完整 Start 之后接收")
+            self.warn_compatibility("query_before_start", msg_type=kind)
+            return None
         header_size = 2 if kind == 6 else 3
         if kind not in (6, 7) or len(payload) < header_size:
             raise ValueError("在线查询刷新头截断")
         actor, zone = payload[:2]
         if actor not in (0, 1) or zone not in ZONES:
-            raise ValueError("在线查询刷新区域无效")
-        rows = self._rows(payload[header_size:])
+            self.warn_compatibility("query_unsupported_region", player=actor, zone=zone)
+            return None
+        try:
+            rows = self._rows(payload[header_size:], source={"msg_type": kind, "player": actor, "zone": zone})
+        except ValueError as error:
+            error.add_note(f"YGOPro 卡片状态查询: msg_type={kind} player={actor} zone=0x{zone:02X}")
+            raise
         if kind == 7 and len(rows) != 1:
-            raise ValueError("单卡刷新必须且只能包含一个查询行")
+            self.warn_compatibility("query_single_row_count", rows=len(rows))
+            rows = rows[:1]
         if kind == 6 and zone in (4, 8) and len(rows) != (7 if zone == 4 else 8):
-            raise ValueError("在线场面刷新槽位数量无效")
+            self.warn_compatibility("query_zone_slot_count", player=actor, zone=zone, rows=len(rows))
         if zone not in (4, 8) and any(row is None for row in rows):
-            raise ValueError("连续区域刷新不能包含空槽")
+            self.warn_compatibility("query_continuous_empty_slot", player=actor, zone=zone)
         indices = range(len(rows)) if kind == 6 else [payload[2]]
         if kind == 7 and (zone in (4, 8) and payload[2] >= (7 if zone == 4 else 8)):
-            raise ValueError("在线单卡刷新槽位越界")
+            self.warn_compatibility("query_extended_slot", player=actor, zone=zone, index=payload[2])
         staged = {}
         for index, row in zip(indices, rows):
             key = actor, zone, index
@@ -113,12 +158,12 @@ class OnlineStateProjection:
                 continue
             flags = row["query_flags"]
             if flags & q.QUERY_POSITION and (row["controller"], row["location"], row["sequence"]) != key:
-                raise ValueError("查询内卡片位置与刷新区域不一致")
+                self.warn_compatibility("query_position_mismatch", player=actor, zone=zone, index=index)
             fields = {name: deepcopy(row[name]) for flag, names in QUERY_FIELD_NAMES.items() if flags & flag for name in names}
             if "code" in fields:
                 fields["code"] &= 0x7FFFFFFF
             previous = self.cards.get(key, {})
-            if self.query_mode == "merge" and ("code" not in fields or fields["code"] == previous.get("code")):
+            if not row.get("redacted") and self.query_mode == "merge" and ("code" not in fields or fields["code"] == previous.get("code")):
                 fields = {**deepcopy(previous), **fields}
             position = fields.get("position", 0)
             hidden = zone == 1 or actor != self.perspective and (zone == 2 or zone != 16 and not position & 5)
@@ -147,14 +192,49 @@ class OnlineStateProjection:
     # 报告已知边界而不把诊断投影宣称为完整 V4 输入
     def coverage(self):
         return {"visibility": "player_view", "query_mode": self.query_mode or "unconfirmed",
+                "confirmation_header_size": self.confirmation_header_size,
+                "chain_entry_size": self.chain_entry_size,
+                "field_rebuilds": self.field_rebuilds,
+                "last_field_rebuild": deepcopy(self.last_field_rebuild),
                 "query_cache_contract_confirmed": self.query_mode is not None,
                 "perspective": self.perspective, "started": self.started, "sequence": self.sequence,
                 "public_count_baseline_valid": self.started and all((actor, zone) in self.counts for actor in (0, 1) for zone in (1, 64)),
                 "v4_observation_complete": False, "online_v4_inference_ready": False,
+                "readiness_scope": "native_observation", "compatible_inference_supported": True,
                 "public_context_processing": "link_online",
                 "public_messages_received": dict(self.public_message_counts),
                 "tracked_hint_lifecycle_consistent": self.public_context.complete,
+                "compatibility_warning_counts": dict(self.compatibility_warning_counts),
+                "latest_compatibility_warnings": list(self.compatibility_warnings),
                 "limitations": ["complete_transition_history_unavailable", "full_server_hint_coverage_unverified", "dynamic_attribute_coverage_unverified"]}
+
+    # 以已完整解析的快照重建缓存与数量，不恢复报文未提供的卡片身份和实例提示
+    def restore_field(self, restored, cards):
+        if not self.started:
+            self.warn_compatibility("reload_before_start")
+            return False
+        counts = {}
+        for player, data in enumerate(restored["players"]):
+            counts.update({(player, zone): count for zone, count in zip((1, 2, 16, 32, 64), data["counts"][:5])})
+            counts[(player, 4)] = len(data["monsters"])
+            counts[(player, 8)] = len(data["spells"])
+        context = OnlinePublicContext((counts[(0, 1)], counts[(1, 1)]))
+        # 快照没有撤销玩家级提示，也不保证旧卡片实例和剩余构筑可以继续追踪
+        context.player_hints = deepcopy(self.public_context.player_hints)
+        context.complete = False
+        context.reversal_known = False
+        context.remaining_composition_known = False
+        self.counts, self.cards, self.public_context = counts, deepcopy(cards), context
+        self.public_notifications.clear()
+        self.invalidated_locations = ()
+        self.last_known_draws = ()
+        self.sequence += 1
+        self.field_rebuilds += 1
+        self.last_field_rebuild = {"sequence": self.sequence, "rule": restored["rule"],
+            "extra_faceup_counts": [data["counts"][5] for data in restored["players"]]}
+        for warning in restored["warnings"]:
+            self.warn_compatibility(**warning)
+        return True
 
     # 按真实接收者绑定提示与记牌可见性，不将单方消息升级为双方事实
     def public_snapshot(self):
@@ -165,7 +245,7 @@ class OnlineStateProjection:
 
     # 由明确的位置变化决定缓存失效范围，连续区域同时失效其槽位编号
     def _event_invalidations(self, kind, payload):
-        if kind in (35, 162):
+        if kind == 35:
             return tuple((actor, zone, None) for actor in (0, 1) for zone in ZONES)
         raw_locations = []
         if kind == 50:
@@ -221,15 +301,20 @@ class OnlineStateProjection:
         elif kind == 56:
             self.disabled_field_mask, = struct.unpack("<I", payload)
         elif kind in (30, 31, 42):
-            # 保留当前在线展示布局，两字节头与 Core 原生 Type31 分开
-            if len(payload) < 2 or len(payload) != 2 + payload[1] * 7:
-                raise ValueError("在线展示卡片消息长度无效")
-            rows = list(struct.iter_unpack("<IBBB", payload[2:]))
-            if any(player not in (0, 1) for _, player, _, _ in rows):
-                raise ValueError("在线展示卡片玩家编号无效")
-            for code, player, zone, sequence in rows:
-                if zone == Zone.DECK:
-                    context.set_deck_card(player, sequence, code)
+            confirmation = parse_online_confirmation(kind, payload)
+            if kind == 31:
+                size = confirmation["header_size"]
+                if self.confirmation_header_size != size:
+                    self.warn_compatibility("confirmation_layout_selected", header_size=size)
+                self.confirmation_header_size = size
+            for card in confirmation["cards"]:
+                if card["location"] == Zone.DECK:
+                    context.set_deck_card(card["controller"], card["sequence"], card["code"])
+                code = card["code"] & 0x7FFFFFFF
+                if code:
+                    # 展示可发生在衍生物尚未进场时，只登记已见身份而不制造场面实体
+                    self.public_notifications.append({"type": kind, "code": code, "turn": self.turn,
+                        "sequence": self.sequence + 1, "visibility": 1 << self.perspective})
         elif kind in (32, 33, 39):
             player = payload[0]
             if player not in (0, 1):
@@ -266,8 +351,8 @@ class OnlineStateProjection:
             if player not in (0, 1) or len(payload) != 2 + 4 * count:
                 raise ValueError("抽卡消息布局无效")
             self.last_known_draws = tuple(card.code for card in context.draw(player, count, hand_counts[player]) if card is not None)
-        elif kind in (35, 162):
-            # 尚未适配的重建先清除旧实例，不能让新占位卡继承旧提示
+        elif kind == 35:
+            # 尚未适配的墓地卡组交换先清除旧实例，Type162 由独立快照入口原子恢复
             self.public_context = OnlinePublicContext()
             # 区域重建本身不证明玩家级限制已撤销
             self.public_context.player_hints = [dict(hints) for hints in context.player_hints]
@@ -290,7 +375,7 @@ class OnlineStateProjection:
                 deltas.append(((actor, zone), delta))
         elif kind == 90 and len(payload) >= 2:
             deltas.append(((payload[0], 1), -payload[1]))
-        elif kind in (35, 162):
+        elif kind == 35:
             self.counts.clear()
         for key, delta in deltas:
             if key in self.counts:

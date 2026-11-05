@@ -1,8 +1,10 @@
 # GKG5 导入回归，覆盖真实模型校验附件原字节来源归档与恶意路径拒绝
 
 from copy import deepcopy
+import asyncio
 import hashlib
 import json
+import random
 import stat
 import zipfile
 
@@ -10,6 +12,9 @@ import pytest
 
 from service.model_repository import LinkModelRepository
 from service.package_content import install_content
+from service.package_decks import install_package_decks
+from service.deck_repository import LinkDeckRepository
+from utils.deck_utils import load_deck
 from tests.v4_fixtures import write_v4_assets, write_v4_checkpoint
 
 
@@ -79,7 +84,106 @@ def test_import_gkg5_preserves_models_and_archives_attachments(tmp_path, bundle,
     assert not list((root / "decks").glob("*.ydk"))
     again = repository.import_gkg(package, package.name)
     assert again["installed_files"] == [] and again["content"] == result["content"]
-    assert repository.discover()["models"][0]["online_inference_ready"] is False
+    assert repository.discover()["models"][0]["online_inference_ready"] is True
+
+
+# 确认入库后可加载修改与删除，重复导入保留修改，远端临时副本保持会话隔离
+def test_package_decks_opt_in_management_and_private_copies(tmp_path, bundle):
+    manifest, files = bundle
+    package = write_bundle(tmp_path, manifest, files)
+    root = tmp_path / "link"
+    imported = LinkModelRepository(root).import_gkg(package, package.name)
+    repository = LinkDeckRepository(root)
+    assert repository.discover() == []
+    result = install_package_decks(root, imported["content"]["archive_id"])
+    assert len(result["installed"]) == 1 and not result["skipped"]
+    reference = result["installed"][0]
+    record = repository.discover()[0]
+    assert record["deck_ref"] == reference
+    assert record["source"]["package_relative_path"] == "测试 池/构筑.YDK"
+    deck = load_deck(repository.deck_root, reference)
+    assert deck.main == [14558127] and deck.extra == [89631139]
+    repository.edit_local_deck(reference, [{"operation": "add", "section": "main", "code": 14558127}])
+    assert repository.discover()[0]["source"]["content_modified"] is True
+    repeated = install_package_decks(root, imported["content"]["archive_id"])
+    assert repeated["installed"] == [] and repeated["preserved"] == [reference]
+    assert load_deck(repository.deck_root, reference).main == [14558127] * 2
+    private = repository.copy_local_to_astrbot("qq:group:100", reference)
+    assert private["source"]["origin_package"]["package_name"] == "gkg5-test"
+    repository.edit_astrbot_deck("qq:group:100", private["deck_ref"], [{"operation": "add", "section": "side", "code": 14558127}])
+    assert load_deck(repository.deck_root, reference).side == []
+    assert private["deck_ref"] not in {item["deck_ref"] for item in repository.discover(scope_id="qq:group:200")}
+    archived = root / imported["content"]["archive_path"]
+    assert (archived / "content/decks/测试 池/构筑.YDK").read_bytes() == ATTACHMENTS["content/decks/测试 池/构筑.YDK"]
+    repository.delete_local_deck(reference)
+    assert repository.discover() == [] and load_deck(repository.deck_root, reference) is None
+    assert (archived / "content/decks/测试 池/构筑.YDK").is_file()
+
+
+# 归档摘要变化必须拒绝入库，非法 YDK 单独反馈且不影响模型导入
+@pytest.mark.parametrize("failure", ["tampered", "invalid_ydk", "oversize", "traversal", "wrong_origin"])
+def test_package_deck_install_rejects_invalid_sources(tmp_path, bundle, failure):
+    manifest, files = bundle
+    deck_path = "content/decks/测试 池/构筑.YDK"
+    if failure in {"invalid_ydk", "oversize"}:
+        files[deck_path] = b"not-a-deck" if failure == "invalid_ydk" else random.Random(5).randbytes(512 * 1024 + 1)
+        row = manifest["optional_content"]["files"][0]
+        row.update(size=len(files[deck_path]), sha256=hashlib.sha256(files[deck_path]).hexdigest())
+    root = tmp_path / "link"
+    imported = LinkModelRepository(root).import_gkg(write_bundle(tmp_path, manifest, files), "test.gkg")
+    archive_id = imported["content"]["archive_id"]
+    if failure == "tampered":
+        (root / imported["content"]["archive_path"] / deck_path).write_bytes(b"changed")
+    if failure == "wrong_origin":
+        source_manifest = root / imported["content"]["archive_path"] / "contents.json"
+        metadata = json.loads(source_manifest.read_text(encoding="utf-8"))
+        metadata["package_name"] = "other"
+        source_manifest.write_text(json.dumps(metadata), encoding="utf-8")
+    if failure in {"invalid_ydk", "oversize"}:
+        result = install_package_decks(root, archive_id)
+        assert len(result["skipped"]) == 1 and not result["installed"]
+    else:
+        with pytest.raises(ValueError):
+            install_package_decks(root, "../outside" if failure == "traversal" else archive_id)
+    assert LinkDeckRepository(root).discover() == []
+
+
+# 真实 HTTP 接口按鉴权确认入库并供统一配置选用，不自动更换对战卡组
+def test_package_decks_authenticated_api_and_selection(tmp_path, bundle):
+    from aiohttp.test_utils import TestClient, TestServer
+    from app_config import ServiceConfig
+    from service.http_api import create_http_app
+    from service.session_manager import LinkSessionManager
+    manifest, files = bundle
+    root = tmp_path / "link"
+    imported = LinkModelRepository(root).import_gkg(write_bundle(tmp_path, manifest, files), "test.gkg")
+    (root / "config.yaml").write_text("agent:\n  deck: original\n", encoding="utf-8")
+
+    # 在真实异步服务中验证入库后的查询选择与删除保护
+    async def exercise():
+        manager = LinkSessionManager(root / "config.yaml", runtime_builder=lambda _: None)
+        app = create_http_app(manager, ServiceConfig(api_token="test-gkg-token"))
+        headers = {"Authorization": "Bearer test-gkg-token"}
+        async with TestClient(TestServer(app)) as client:
+            payload = {"archive_id": imported["content"]["archive_id"]}
+            unauthenticated = await client.post("/api/v1/models/import-decks", json=payload)
+            assert unauthenticated.status == 401
+            bad = await client.post("/api/v1/models/import-decks", headers=headers, json={"archive_id": "../outside"})
+            assert bad.status == 400
+            response = await client.post("/api/v1/models/import-decks", headers=headers, json=payload)
+            result = await response.json()
+            assert response.status == 201, result
+            reference = result["data"]["installed"][0]
+            configuration = await client.get("/api/v1/configuration", headers=headers)
+            snapshot = (await configuration.json())["data"]
+            assert snapshot["agent"]["deck"] == "original"
+            assert snapshot["deck_catalog"][0]["deck_ref"] == reference
+            selected = await client.patch("/api/v1/configuration", headers=headers,
+                json={"expected_revision": snapshot["revision"], "patch": {"agent": {"deck": reference}}})
+            assert selected.status == 200, await selected.text()
+            deleted = await client.delete("/api/v1/decks/local", headers=headers, json={"deck_ref": reference})
+            assert deleted.status == 409
+    asyncio.run(exercise())
 
 
 # 附件合同失败必须发生在安装任何模型之前

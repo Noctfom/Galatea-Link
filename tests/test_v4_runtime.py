@@ -60,11 +60,11 @@ def test_v4_numpy_encoder_and_online_gate(assets):
 
 # 在新进程验证资产和编码路径不会导入 Torch
 def test_v4_numpy_path_does_not_import_torch(assets):
-    code = "from model_protocols.v4.assets import load_v4_assets; from model_protocols.v4.encoder import GalateaEncoder; from tests.v4_fixtures import v4_snapshot; import sys; a=load_v4_assets(sys.argv[1]); GalateaEncoder(a).encode(v4_snapshot(),0); assert 'torch' not in sys.modules"
+    code = "from model_protocols.v4.assets import load_v4_assets; from model_protocols.v4.encoder import GalateaEncoder; from tests.v4_fixtures import v4_snapshot; from tests.v4_online_fixtures import make_state; import sys; a=load_v4_assets(sys.argv[1]); e=GalateaEncoder(a); e.encode(v4_snapshot(),0); e.encode(make_state()[0].get_snapshot(),0); assert 'torch' not in sys.modules"
     subprocess.run([sys.executable, "-X", "utf8", "-c", code, str(assets.root)], check=True, cwd=Path(__file__).resolve().parents[1], timeout=30)
 
 
-# 验证 PTH 的真实网络前向和对在线不可用状态的公开声明
+# 验证 PTH 真实前向和兼容在线能力，原生观测完整性仍单独报告
 def test_v4_pytorch_forward_and_metadata(assets, tmp_path):
     path, _ = write_v4_checkpoint(tmp_path, assets)
     assert inspect_model_checkpoint(path)["model_protocol_version"] == 4
@@ -74,7 +74,29 @@ def test_v4_pytorch_forward_and_metadata(assets, tmp_path):
     assert values.shape == (1, 1)
     assert np.isfinite(logits).all() and np.isfinite(values).all()
     assert backend.metadata["offline_inference_ready"] is True
-    assert backend.metadata["online_inference_ready"] is False
+    assert backend.metadata["online_inference_ready"] is True
+    assert backend.metadata["online_history_policy"] == "masked_unavailable"
+    assert backend.metadata["native_online_observation_complete"] is False
+
+
+# Core 的 V4 部署清单和 PTH 可以省略训练运行编号，仍可发现并真实前向
+def test_v4_checkpoint_without_run_id_is_discovered_and_loaded(assets, tmp_path):
+    import torch
+    path, metadata = write_v4_checkpoint(tmp_path, assets)
+    metadata.pop("run_id")
+    torch.save(metadata, path)
+    marker = {key: value for key, value in metadata.items() if key != "model_state_dict"}
+    marker["checkpoint"] = {"status": "complete", "file": path.name}
+    marker["artifact_manifest_version"] = 3
+    path.with_suffix(".artifacts.json").write_text(json.dumps(marker), encoding="utf-8")
+    repository = LinkModelRepository(tmp_path)
+    destination = repository.model_root / path.name
+    destination.write_bytes(path.read_bytes())
+    destination.with_suffix(".artifacts.json").write_bytes(path.with_suffix(".artifacts.json").read_bytes())
+    assert repository.get_model(path.name)["run_id"] is None
+    backend = load_model_backend(destination, asset_path=assets.root)
+    logits, values, _ = backend.inference_runtime.infer(backend.encoder.encode(v4_snapshot(), 0))
+    assert np.isfinite(logits).all() and np.isfinite(values).all()
 
 
 # 验证 GKG4 导入及坏资产在安装模型前被拒绝
@@ -106,7 +128,7 @@ def test_import_v4_gkg_preserves_protocol_identity(assets, tmp_path, failure):
     imported = repository.import_gkg(package, package.name)
     assert imported["model_protocol_version"] == 4
     assert f"model_assets/v4/{metadata['model_id']}" in imported["assets_path"]
-    assert repository.discover()["models"][0]["online_inference_ready"] is False
+    assert repository.discover()["models"][0]["online_inference_ready"] is True
     assert not list((tmp_path / "link/model_assets/v3").iterdir())
 
 

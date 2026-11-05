@@ -2,6 +2,8 @@
 
 该接口是 Galatea Link 与 AstrBot、QQ 或其他上层平台之间的稳定边界，不依赖任何具体机器人框架
 
+3.4.0 新增 `link.runtime.get_model_feedback()`，HTTP 对应 `GET /api/v1/model-feedback`，返回同一局的有限历史与最近模型预测。读取不触发推理，设置通过统一 `intervention.core_feedback_enabled`／`core_feedback_passive_enabled` 控制，细节见 [局内模型反馈](MODEL_FEEDBACK.md)。API v1 和现有决策身份不变
+
 ## 使用方式
 
 ```python
@@ -44,7 +46,7 @@ asyncio.run(main())
 
 `link.runtime.get_v4_diagnostics()` 返回当前或最近一局的 V4 输入覆盖报告副本。读取只访问缓存，不结算响应历史、不加载模型、不执行推理。`get_status().core_model.observation_diagnostics` 只含摘要；HTTP 服务在 `GET /api/v1/status` 顶层的 `v4_observation_diagnostics` 保留相同摘要，即使游戏会话已经停止
 
-详细报告通过鉴权接口 `GET /api/v1/models/diagnostics/v4` 获取，响应的 `data` 使用 `galatea.v4_observation_diagnostics.v1`。报告只含字段覆盖、坐标、计数和阻塞原因，不含卡密、卡组、响应字节或密钥，且不自动附加到 LLM 上下文。`online_inference_ready=false` 仍然保留，详见 [V4 诊断与历史边界](V4_ADAPTER.md)
+详细报告通过鉴权接口 `GET /api/v1/models/diagnostics/v4` 获取，响应的 `data` 使用 `galatea.v4_observation_diagnostics.v1`。报告只含字段覆盖、坐标、计数和原因，不含卡密、卡组、响应字节或密钥，且不自动附加到 LLM 上下文。3.3.9 起 `readiness_scope=native_observation` 的 `online_inference_ready=false` 只代表原生完整性未满足，不阻止独立兼容在线路径；报告新增 `online_compatibility`，运行状态另有 `runtime.core_model.online_input`，详见 [V4 兼容在线](V4_ADAPTER.md#兼容在线输入)
 
 ## 动态介入控制
 
@@ -132,7 +134,7 @@ V4 诊断的动作组增加 `candidate_stage` 与 `selection_response_checks`，
 
 3.3.8 将 Type21 连锁排序纳入同一异步决策与提交复核。外部智能体仍选择 `choice_id`，默认顺序候选按 `MACRO_SORT` 处理，不计为取消或撤选回退；`sort_operation` 及原提示索引是观察的新增字段，现有接口版本及超时控制继续适用
 
-3.3.3 在贪心与温度采样两种 Core 策略下启用 `leaf_first_v1`，V3 在线模型可以直接使用，V4 在线推理限制保持不变。配置文件 `decision`、`GET/PATCH /api/v1/controls` 的 `intervention` 分区以及 WebUI 决策策略共用以下字段，停止状态也可以保存
+3.3.3 在贪心与温度采样两种 Core 策略下启用 `leaf_first_v1`，3.3.9 起 V4 兼容在线沿用同一策略。配置文件 `decision`、`GET/PATCH /api/v1/controls` 的 `intervention` 分区以及 WebUI 决策策略共用以下字段，停止状态也可以保存
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |

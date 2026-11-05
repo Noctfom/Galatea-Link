@@ -195,7 +195,7 @@ async def test_network_send_returns_transport_failure():
     assert await client.send_decision(0) is False
 
 
-# 公开提示清掉动作池之后 Retry 仍恢复原始宏动作坐标而不是快照索引
+# 提示保留挂起菜单，动作池暂缺时 Retry 仍恢复原始宏动作坐标
 @pytest.mark.asyncio
 async def test_retry_restores_original_prompt_actions_after_hint():
     link, request, outcome = commit_link(AsyncMock(return_value=True))
@@ -209,8 +209,11 @@ async def test_retry_restores_original_prompt_actions_after_hint():
     link.ignore_actions_blacklist = []
     link.ignore_choice_ids_blacklist = []
     link._schedule_decision = AsyncMock()
+    pending_actions = list(link.gamestate.current_valid_actions)
     link.gamestate.update(160, struct.pack("<IBI", 0, 0, 0))
-    assert link.gamestate.current_valid_actions == []
+    assert link.gamestate.current_valid_actions == pending_actions
+    # 单独模拟上下文暂缺动作池，继续验证 Retry 的恢复路径
+    link.gamestate.current_valid_actions = []
     await link.handle_server_msg(1, bytes([1]))
     link._schedule_decision.assert_awaited_once_with(15, b"prompt", engine_retry=True)
     assert link.gamestate.current_valid_actions[0].macro_targets == [raw_location]

@@ -49,6 +49,10 @@ class GalateaRuntimeApi:
         self._last_auto_chat_at = 0.0
         self._last_auto_chat_text: str | None = None
 
+    # 读取同一局模型反馈副本，不触发额外推理
+    def get_model_feedback(self):
+        return self._link.get_model_feedback()
+
     # 创建供 AstrBot 或其他消费者读取的事件订阅
     def subscribe_events(self, max_queue_size: int = 128) -> LinkEventSubscription:
         return self._event_bus.subscribe(max_queue_size=max_queue_size)
@@ -68,6 +72,8 @@ class GalateaRuntimeApi:
             deck_snapshot = copy.deepcopy(snapshot_builder())
         return {
             "schema_version": "galatea.runtime_status.v1",
+            "model_feedback": {key: value for key, value in self.get_model_feedback().items() if key != 'history'}
+                if callable(getattr(self._link, 'get_model_feedback', None)) else None,
             "connected": bool(getattr(self._link.client, "is_connected", False)),
             "network_protocol": {
                 "configured_version": getattr(
@@ -134,6 +140,7 @@ class GalateaRuntimeApi:
                     None,
                 ),
                 "metadata": model_metadata,
+                "online_input": copy.deepcopy(getattr(getattr(ai, "encoder", None), "last_online_report", None)),
             },
             "decision": {
                 "mode": decision_config.mode,
@@ -197,7 +204,11 @@ class GalateaRuntimeApi:
 
     # 返回缓存的匿名 V4 映射诊断，读取不会结算历史或执行编码
     def get_v4_diagnostics(self):
-        return copy.deepcopy(getattr(self._link, "last_v4_diagnostics", None) or empty_v4_diagnostics())
+        report = copy.deepcopy(getattr(self._link, "last_v4_diagnostics", None) or empty_v4_diagnostics())
+        report["readiness_scope"] = "native_observation"
+        report["online_compatibility"] = copy.deepcopy(getattr(
+            getattr(getattr(self._link, "ai", None), "encoder", None), "last_online_report", None))
+        return report
 
     # 状态接口只携带小摘要，详细字段缺口通过专用接口读取
     def _v4_diagnostic_summary(self):
@@ -276,6 +287,9 @@ class GalateaRuntimeApi:
             self._baseline_game_chat_config = updated_game_chat
             self._active_autonomous_override = None
             self._link.decision_policy.config = updated
+            callback = getattr(self._link, '_feedback_controls_changed', None)
+            if callback is not None:
+                callback()
             self._link.game_chat_config = updated_game_chat
             self._revision += 1
             current = self.get_controls()
@@ -660,6 +674,8 @@ class GalateaRuntimeApi:
             "force_llm_message_types",
             "include_core_suggestion",
             "core_time_budget",
+            "core_feedback_enabled",
+            "core_feedback_passive_enabled",
             "llm_time_budget",
         }
         unknown_autonomy = set(autonomy) - {
@@ -674,6 +690,11 @@ class GalateaRuntimeApi:
             raise ValueError("宏观控制补丁包含未知字段")
 
         replacements = {}
+        for name in ('core_feedback_enabled', 'core_feedback_passive_enabled'):
+            if name in intervention:
+                if type(intervention[name]) is not bool:
+                    raise ValueError('模型反馈开关必须是布尔值')
+                replacements[name] = intervention[name]
         if "core_loop_retry_enabled" in intervention:
             if type(intervention["core_loop_retry_enabled"]) is not bool:
                 raise ValueError("core_loop_retry_enabled 必须为布尔值")
@@ -908,6 +929,8 @@ class GalateaRuntimeApi:
             "force_llm_message_types": list(config.force_llm_message_types),
             "include_core_suggestion": config.include_core_suggestion,
             "core_time_budget": config.core_time_budget,
+            "core_feedback_enabled": config.core_feedback_enabled,
+            "core_feedback_passive_enabled": config.core_feedback_passive_enabled,
             "llm_time_budget": config.llm_time_budget,
         }
 

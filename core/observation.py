@@ -12,6 +12,9 @@ from core.selection_protocol import sum_options
 SCHEMA_VERSION = "galatea.llm_observation.v1"
 
 MESSAGE_NAMES = {
+    30: "confirm_deck_top",
+    31: "confirm_cards",
+    42: "confirm_extra_top",
     10: "select_battle_command",
     11: "select_idle_command",
     12: "select_effect_yes_no",
@@ -38,6 +41,7 @@ MESSAGE_NAMES = {
     74: "chain_end",
     75: "chain_activation_negated",
     76: "chain_effect_disabled",
+    162: "reload_field",
     90: "draw",
     91: "damage",
     92: "recover",
@@ -400,7 +404,7 @@ class LlmObservationBuilder:
                        "lscale": entity.lscale, "rscale": entity.rscale, "link_marker": entity.link_marker})
         known_fields = getattr(entity, "query_known_fields", None)
         if known_fields is not None:
-            result["dynamic_state_source"] = "server_query"
+            result["dynamic_state_source"] = getattr(entity, "state_source", "server_query")
             if getattr(entity, "query_invalidated", False):
                 result["dynamic_state_source"] = "query_invalidated"
             result["query_sequence"] = getattr(entity, "query_sequence", None)
@@ -506,6 +510,15 @@ class LlmObservationBuilder:
         if event_type == 26:
             result["selection_operation"] = {4: "select", 5: "unselect", 6: "finish", 7: "cancel"}.get(action.operation_id, "unknown")
             result["result_selected_count"] = action.selection_count
+        if event_type == 16:
+            result["chain_operation"] = "cancel" if action.index == -1 else "activate"
+            result["cancelable"] = bool(action.cancelable)
+            if action.index != -1:
+                result["effect_mode"] = action.prompt_flags & 0xFF
+                result["forced"] = bool(action.prompt_flags & 0x100)
+            result["special_count"] = action.context_value
+            result["hint_timing"] = action.prompt_value
+            result["opponent_hint_timing"] = action.prompt_value2
 
         desc_id = getattr(action, "desc_id", 0)
         if desc_id and event_type not in (18, 19, 24, 140, 141, 142, 143):

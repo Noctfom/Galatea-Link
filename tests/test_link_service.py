@@ -230,6 +230,10 @@ class LinkHttpApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health.status, 200)
         self.assertEqual(self.created, [])
         self.assertEqual((await health.json())["data"]["version"], LINK_VERSION)
+        capabilities = (await (await self.client.get('/api/v1/capabilities')).json())['data']
+        self.assertIn('galatea.link.api.v1', capabilities['external_api_versions'])
+        self.assertTrue(capabilities['online_observation']['field_reload'])
+        self.assertFalse(capabilities['online_observation']['spectator_seat'])
 
         unauthorized = await self.client.get("/api/v1/status")
         self.assertEqual(unauthorized.status, 401)

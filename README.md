@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.3.8-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.4.0-6b8f71)
 
 </div>
 
@@ -14,14 +14,14 @@ Galatea Link 是一个独立的游戏王智能体运行与接入层。它通过 
 
 Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://github.com/Noctfom/Galatea-Link-mobile)！也可以[点击这里](galatea.noctfom.top)直接前往软件下载页！
 
-> 在线模型仍以 V3 为稳定接入路径。V4 资产与离线推理已接通，在线状态映射和受控编码对照可供诊断，完整历史与真实服务器覆盖仍待验收，详见 [V4 接入说明](docs/V4_ADAPTER.md)。请先在测试房间验证卡组、协议版本和决策时限
+> V4 从 3.3.9 起支持玩家可见状态兼容在线推理，可在 `core_only`、`hybrid` 和 `llm_review` 模式直接参与对局。无法对齐的原生转移历史默认屏蔽，动态属性缺口会报告为警告；实际策略质量仍待真实对局验证，详见 [V4 接入说明](docs/V4_ADAPTER.md)
 
 ## 已实现能力
 
 - 连接本地或在线 YGOPro 兼容服务器，支持服务端协议版本拒绝后的有限自动重试
 - 加入房间、上传卡组、准备、猜拳、先后攻选择，以及房主在双方准备后的自动开局
 - 加载模型协议 V3 的 PyTorch 或 ONNX 模型，支持 GKG 格式 2 导入和模型资产校验
-- 导入 V4 GKG 格式 4／5、精确词表和编译语义，支持独立 PTH／ONNX 离线推理；[GKG5 附件](docs/GKG_IMPORT.md)独立归档，暂未开放 V4 在线决策
+- 导入 V4 GKG 格式 4／5、精确词表和编译语义，支持独立 PTH／ONNX 及兼容在线决策；[GKG5 附件](docs/GKG_IMPORT.md)独立归档，包内卡组可确认后加入本地仓库
 - `core_only`、`hybrid`、`llm_review`、`llm_only` 四种决策模式
 - Core 闭环回退采用末端优先策略，可在 WebUI 和统一 API 调整开关与重复阈值
 - Link 内置 OpenAI Compatible LLM，支持结构化动作、静态前缀缓存、请求诊断和安全回退
@@ -174,8 +174,10 @@ python scripts/audit_release_privacy.py
 - [LLM 对局信息契约](docs/LLM_INFORMATION.md)：LLM 能看到什么、缓存和信息边界
 - [AstrBot 远程桥接](docs/ASTRBOT_BRIDGE.md)：插件安装、Pages、工具和会话隔离
 - [DeepSeek Harness 对接](docs/DSH_BRIDGE.md)：dsh 原生工具、后台决策和安装检查
+- [插件升级兼容与后续方案](docs/INTEGRATION_COMPATIBILITY.md)：哪些更新只改 Link，以及 AstrBot／dsh 的后续维护批次
 - [模型协议适配](docs/MODEL_PROTOCOL_ADAPTERS.md)：V3、PTH/ONNX、GKG 和后续版本扩展
 - [V4 接入说明](docs/V4_ADAPTER.md)：资产、离线推理、在线进度及验证方式
+- [局内模型反馈](docs/MODEL_FEEDBACK.md)：预测面板、旁路评测、共享接口与 ONNX 输出边界
 - [V4 对接职责与模型合同](docs/CORE_V4_ONLINE_CONTRACT.md)：Core 模型合同、受控接入和真实服务器解析的职责边界
 - [安全与隐私](docs/SECURITY.md)：密钥、卡组、日志与 Git 上传检查
 - [更新记录](CHANGELOG.md)：从 Link 3.0.0 开始的软件版本记录
@@ -183,7 +185,7 @@ python scripts/audit_release_privacy.py
 
 ## 当前限制
 
-- 当前在线稳定模型协议为 V3；V4 已接通资产和离线推理，在线观测不完整时拒绝启动模型决策
+- V3 在线接入保持兼容；V4 使用玩家可见状态兼容推理，历史掩蔽和缺失属性的策略影响尚未量化
 - 在线 BO3 局间换备尚未接入稳定上层状态机，当前只支持赛前编辑临时卡组的副卡组区域
 - LLM/AstrBot 可能超过游戏动作时限，Link 会取消过期请求并使用 Core 或 RuleBot 安全回退
 - 游戏协议只提供玩家可见数据；Link 不会把不可见卡片或其他会话的卡组信息交给外部智能体

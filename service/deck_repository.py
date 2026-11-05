@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from utils.card_reader import card_db
-from utils.deck_utils import load_deck
+from utils.deck_utils import load_deck, _resolve_deck_path
+from service.package_content import reject_links
 
 
 SAFE_DECK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
@@ -221,6 +222,7 @@ class LinkDeckRepository:
                         },
                     )
                 )
+        records.extend(self._discover_package_decks())
         if scope_id is None:
             return records
         scope_hash = hash_scope_id(scope_id)
@@ -269,6 +271,44 @@ class LinkDeckRepository:
         )
         return records
 
+    # 发现 GKG 独立目录中的本地副本且将来源信息绑定到实际文件
+    def _discover_package_decks(self):
+        records = []
+        for path in sorted((self.deck_root / "gkg_imports").glob("*/*.ydk")):
+            group, deck_id = path.parent.name, path.stem
+            if not re.fullmatch(r"[0-9a-f]{24}", group) or not re.fullmatch(r"[0-9a-f]{24}", deck_id):
+                continue
+            metadata_path = path.with_suffix(".meta.json")
+            try:
+                reject_links(path)
+                reject_links(metadata_path)
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict) or metadata.get("package_group") != group or not isinstance(metadata.get("source"), dict):
+                    continue
+                source = {**metadata["source"], "kind": "link_local", "origin": "gkg_package",
+                    "filename": path.relative_to(self.deck_root).as_posix()}
+                display_name = normalize_source_text(metadata.get("display_name"), "卡组显示名", required=True)
+                records.append(self._describe(path, f"gkg:{group}:{deck_id}", display_name, source))
+            except (OSError, ValueError):
+                continue
+        return records
+
+    # 安全定位允许本地管理的根目录卡组或 GKG 副本
+    def _local_target(self, deck_ref):
+        reference = normalize_source_text(deck_ref, "Link 本地卡组引用", required=True)
+        if not reference.startswith("gkg:"):
+            filename = validate_local_deck_filename(f"{reference}.ydk")
+            if (self.deck_root / filename).is_symlink():
+                raise PermissionError("不允许管理符号链接卡组")
+        record = next((item for item in self.discover() if item["deck_ref"] == reference), None)
+        if record is None:
+            raise FileNotFoundError("指定的 Link 本地卡组不存在")
+        target, _, _ = _resolve_deck_path(self.deck_root, reference)
+        if target is None:
+            raise FileNotFoundError("指定的 Link 本地卡组不可用")
+        reject_links(target)
+        return target, record
+
     # 将浏览器提供的 YDK 保存为 Link 根目录本地卡组
     def import_local_ydk(
         self,
@@ -301,30 +341,12 @@ class LinkDeckRepository:
             },
         )
 
-    # 删除 Link 根目录中的指定本地卡组文件
+    # 删除指定本地卡组或 GKG 副本并保留附件归档原件
     def delete_local_deck(self, deck_ref: Any) -> dict[str, Any]:
-        normalized_ref = normalize_source_text(
-            deck_ref,
-            "Link 本地卡组引用",
-            required=True,
-        )
-        filename = validate_local_deck_filename(f"{normalized_ref}.ydk")
-        target = self.deck_root / filename
-        if target.is_symlink():
-            raise PermissionError("不允许删除符号链接卡组")
-        if not target.is_file():
-            raise FileNotFoundError("指定的 Link 本地卡组不存在")
-        record = self._describe(
-            target,
-            normalized_ref,
-            normalized_ref,
-            {
-                "kind": "link_local",
-                "label": "Link 本地卡组",
-                "filename": target.name,
-            },
-        )
+        target, record = self._local_target(deck_ref)
         target.unlink()
+        if record["source"].get("origin") == "gkg_package":
+            target.with_suffix(".meta.json").unlink()
         return record
 
     # 按单卡操作修改 Link 根目录中的本地卡组
@@ -338,27 +360,22 @@ class LinkDeckRepository:
             "Link 本地卡组引用",
             required=True,
         )
-        filename = validate_local_deck_filename(f"{normalized_ref}.ydk")
-        deck_path = self.deck_root / filename
-        if deck_path.is_symlink():
-            raise PermissionError("不允许修改符号链接卡组")
-        if not deck_path.is_file():
-            raise FileNotFoundError("指定的 Link 本地卡组不存在")
+        deck_path, record = self._local_target(normalized_ref)
         with deck_path.open("r", encoding="utf-8-sig") as stream:
             _, sections = normalize_ydk_text(stream.read())
         canonical = apply_deck_operations(sections, operations)
         write_text_atomically(deck_path, canonical)
+        source = {**record["source"], "content_modified": True, "last_edited_at": time.time()}
+        if source.get("origin") == "gkg_package":
+            metadata_path = deck_path.with_suffix(".meta.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["source"] = source
+            write_text_atomically(metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2))
         return self._describe(
             deck_path,
             normalized_ref,
-            normalized_ref,
-            {
-                "kind": "link_local",
-                "label": "Link 本地卡组",
-                "filename": deck_path.name,
-                "content_modified": True,
-                "last_edited_at": time.time(),
-            },
+            record["display_name"],
+            source,
         )
 
     # 导入 AstrBot 工具箱缓存并返回可供配置使用的 deck_ref
@@ -487,7 +504,7 @@ class LinkDeckRepository:
         )
         if local_record is None:
             raise FileNotFoundError("指定的 Link 本地卡组不存在")
-        source_path = self.deck_root / local_record["source"]["filename"]
+        source_path, _ = self._local_target(normalized_ref)
         if not source_path.is_file() or source_path.is_symlink():
             raise FileNotFoundError("Link 本地卡组文件不可用")
         with source_path.open("r", encoding="utf-8-sig") as stream:
@@ -524,6 +541,8 @@ class LinkDeckRepository:
             "imported_at": copied_at,
             "expires_at": copied_at + ASTRBOT_DECK_TTL_SECONDS,
         }
+        if local_record["source"].get("origin") == "gkg_package":
+            source["origin_package"] = {key: local_record["source"][key] for key in ("package_name", "package_relative_path")}
         if scope_id.startswith("dsh:"):
             source["provider"] = "dsh"
         existing_source = existing_metadata.get("source")

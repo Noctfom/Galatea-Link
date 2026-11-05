@@ -5,6 +5,7 @@ from copy import copy
 import io
 from pathlib import Path
 import struct
+import traceback
 from types import MethodType, SimpleNamespace
 
 from core import query_protocol as q
@@ -79,8 +80,14 @@ def readonly_core_reference(root, state, rows, player=0, *, msg_type=11, payload
     methods = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in {"get_snapshot", "_parse_valid_actions"}]
     assigns = [node for node in tree.body if isinstance(node, ast.Assign) and any(
         isinstance(target, ast.Name) and target.id in {"_IDLE_COMMAND_OPERATIONS", "_IDLE_COMMAND_SUMMON_METHODS", "_IDLE_COMMAND_LABELS"} for target in node.targets)]
-    namespace = {**vars(d), **vars(constants), "copy": copy, "struct": struct,
+    namespace = {**vars(d), **vars(constants), "copy": copy, "struct": struct, "io": io, "traceback": traceback,
         "card_db": FixtureCardReader(), "validate_transition_history": validate_transition_history}
+    if msg_type == 16:
+        # 在内存加载参考连锁解析函数，保持不导入 Core 或写入模块缓存
+        protocol = ast.parse((Path(root) / "core_message_protocol.py").read_text(encoding="utf-8"))
+        names = {"CoreMessageProtocolError", "_read_exact", "read_chain_prompt", "parse_chain_prompt"}
+        nodes = [node for node in protocol.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<readonly Core chain>", "exec"), namespace)
     exec(compile(ast.Module(body=[*assigns, *methods], type_ignores=[]), "<readonly Core snapshot>", "exec"), namespace)
     projection = state.online_projection
     brain = SimpleNamespace(turn=state.turn, phase=state.phase, my_lp=state.my_lp, op_lp=state.op_lp,

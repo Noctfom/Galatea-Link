@@ -5,6 +5,7 @@ import random
 import os
 import json
 import time
+import stat
 from pathlib import Path
 from utils.card_reader import card_db
 
@@ -25,15 +26,24 @@ def list_decks(deck_dir):
         return []
     return [f[:-4] for f in os.listdir(deck_dir) if f.endswith('.ydk')]
 
-# 将公开 deck_ref 安全解析到本地或 AstrBot 会话目录
+# 检查路径是否属于符号链接或 Windows 目录联接
+def _is_link_or_junction(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+# 将公开 deck_ref 安全解析到本地或隔离导入目录
 def _resolve_deck_path(base_dir, deck_name):
     root = Path(base_dir).expanduser().resolve()
     reference = str(deck_name).strip()
-    if reference.startswith("astrbot:"):
+    if reference.startswith(("astrbot:", "gkg:")):
         parts = reference.split(":")
         if len(parts) != 3:
             return None, reference, None
-        _, scope_id, deck_id = parts
+        namespace, scope_id, deck_id = parts
         if not all(
             value
             and len(value) <= 80
@@ -41,8 +51,13 @@ def _resolve_deck_path(base_dir, deck_name):
             for value in (scope_id, deck_id)
         ):
             return None, reference, None
-        path = root / "astrbot_imports" / scope_id / f"{deck_id}.ydk"
+        directory = "gkg_imports" if namespace == "gkg" else "astrbot_imports"
+        path = root / directory / scope_id / f"{deck_id}.ydk"
+        if namespace == "gkg" and any(_is_link_or_junction(parent) for parent in (path, *path.parents)):
+            return None, reference, None
         metadata_path = path.with_suffix(".meta.json")
+        if namespace == "gkg" and _is_link_or_junction(metadata_path):
+            return None, reference, None
         display_name = reference
         source = None
         try:
@@ -51,7 +66,13 @@ def _resolve_deck_path(base_dir, deck_name):
                 display_name = metadata["display_name"]
             if isinstance(metadata.get("source"), dict):
                 source = dict(metadata["source"])
+            if namespace == "gkg":
+                if metadata.get("package_group") != scope_id or source is None:
+                    return None, reference, None
+                source.update({"kind": "link_local", "origin": "gkg_package", "filename": path.relative_to(root).as_posix()})
         except Exception:
+            if namespace == "gkg":
+                return None, reference, None
             pass
     else:
         if (

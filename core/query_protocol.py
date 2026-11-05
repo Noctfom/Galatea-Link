@@ -85,8 +85,8 @@ def _read_i32(stream, label):
     return struct.unpack('<i', _read_exact(stream, 4, label))[0]
 
 
-# 按旧式查询位图解码卡片字段且拒绝残留数据
-def parse_legacy_card_query(payload):
+# 按旧式查询位图解码，默认严格消费且允许在线入口保留有界尾部
+def parse_legacy_card_query(payload, *, allow_trailing_data=False):
     """按公开旧版 query_card 位序解析完整卡片个体状态"""
     raw = bytes(payload)
     if len(raw) < 8:
@@ -186,7 +186,8 @@ def parse_legacy_card_query(payload):
         result["link_rating"] = _read_u32(stream, "link rating")
         result["link_marker"] = _read_u32(stream, "link marker")
 
-    if stream.tell() != data_length:
+    consumed = stream.tell()
+    if consumed > data_length or consumed != data_length and not allow_trailing_data:
         raise CoreQueryError(
             f"query_card consumed {stream.tell()} bytes but header reports {data_length}"
         )
@@ -203,4 +204,8 @@ def parse_legacy_card_query(payload):
         is_disabled=bool(result["status_mask"] & STATUS_DISABLED),
         is_forbidden=bool(result["status_mask"] & STATUS_FORBIDDEN),
     )
+    if allow_trailing_data:
+        # 在线兼容入口只记录未消费长度，由外层行头保证下一条记录的边界
+        result["query_consumed_bytes"] = consumed
+        result["query_trailing_bytes"] = data_length - consumed
     return result

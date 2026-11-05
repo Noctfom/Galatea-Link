@@ -49,4 +49,8 @@ class InterventionPolicy:
             "policy_mode": core_decision.policy_mode,
             "temperature": core_decision.temperature,
         }
+        feedback = getattr(core_decision, 'feedback', None)
+        if feedback is not None and self.config.core_feedback_enabled:
+            observation['core_suggestion']['state_evaluation'] = {
+                key: feedback[key] for key in ('discounted_value', 'probabilities', 'remaining_events', 'length_unit', 'calibration')}
         return observation

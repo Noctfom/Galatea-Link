@@ -1816,6 +1816,29 @@ input[type="checkbox"] {
   }
 }
 
+/* 模型反馈沿用浅色与深色主题，图形仅显示真实采样点 */
+.feedback-settings, .feedback-chart-panel { margin-bottom: 20px; }
+.feedback-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; }
+.feedback-controls .switch-row { flex: 1 1 290px; }
+.feedback-metrics { margin-bottom: 20px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.feedback-chart-panel .panel-heading > select { width: auto; max-width: 260px; min-width: 180px; }
+.feedback-chart-panel .panel-heading > div { flex: 1; }
+.feedback-detail-grid { grid-template-columns: 1fr 1fr; }
+.feedback-chart { min-height: 250px; }
+.feedback-chart svg { display: block; width: 100%; height: 250px; }
+.feedback-chart .feedback-axis { stroke: var(--line); stroke-width: 1; }
+.feedback-chart .feedback-line { fill: none; stroke: var(--accent); stroke-width: 2; }
+.feedback-chart .feedback-point { fill: var(--accent); }
+.feedback-chart text { fill: var(--text-soft); font-size: 12px; }
+.feedback-action-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.feedback-action-row progress { flex: 1; accent-color: var(--accent); height: 7px; }
+.feedback-action-row strong { width: 64px; text-align: right; }
+.feedback-action-row > span { flex: 0 1 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1000px) {
+  .feedback-detail-grid { grid-template-columns: 1fr; }
+  .feedback-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

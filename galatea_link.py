@@ -20,6 +20,8 @@ from agents.decision_policy import DecisionOutcome, InterventionPolicy
 from agents.llm_client import LlmDecisionSkipped, create_llm_client
 from action_candidates import MACRO_ACTION_MSGS, build_macro_action_pool
 from core.decision_runtime import DecisionCoordinator, DecisionRequest
+from core.model_feedback import ModelFeedbackHistory
+
 from core.gamestate import DuelState, INTERACTION_MESSAGE_TYPES
 from core.game_chat import (
     STOC_CHAT,
@@ -59,6 +61,8 @@ from core.runtime_api import GalateaRuntimeApi
 from core.remote_decisions import RemoteDecisionBroker
 from utils.card_reader import card_db
 from utils.deck_utils import load_deck
+
+FEEDBACK_SAMPLE_INTERVAL = 0.75
 
 class GalateaLink:
     def __init__(
@@ -155,6 +159,8 @@ class GalateaLink:
             _console_print("⚠️ Core 模型不可用，当前进程将使用 LLM 或 RuleBot 安全回退")
         elif not self.ai.model_available:
             _console_print(f"⚠️ {self.ai.model_metadata.get('online_block_reason', '模型尚未开放在线推理')}")
+        elif self.ai.model_metadata.get("online_warning"):
+            _console_print("🧠 " + self.ai.model_metadata["online_warning"])
         if self.core_model_loaded and self.ai.model_protocol_version == 4:
             self.model_assets_path = self.ai.encoder.assets.root
 
@@ -206,6 +212,10 @@ class GalateaLink:
         self.observation_sequence = 0
         self.latest_observation = None
         self.decision_policy = InterventionPolicy(decision_config or DecisionConfig())
+        self.model_feedback = ModelFeedbackHistory()
+        self._feedback_task = None
+        self._feedback_future = None
+        self._feedback_pending = None
         self.remote_decisions = RemoteDecisionBroker(self.event_bus)
         active_llm_config = llm_config or LlmConfig()
         self.llm_config = active_llm_config
@@ -331,6 +341,7 @@ class GalateaLink:
             if getattr(self, "duel_active", False):
                 await self._finish_duel("link_stopped")
             await self.decision_coordinator.close()
+            self._cancel_feedback()
             await self.client.close()
             if self.llm_client is not None:
                 await self.llm_client.close()
@@ -581,7 +592,11 @@ class GalateaLink:
                     )
 
             elif msg_type == 0x01:
-                msgs = OCGParser.robust_parse(msg_data, strict=True)
+                projection = getattr(self.gamestate, "online_projection", None)
+                msgs = OCGParser.robust_parse(msg_data, strict=True, compatibility=True,
+                    on_warning=getattr(projection, "warn_compatibility", None),
+                    confirmation_header_size=getattr(projection, "confirmation_header_size", None),
+                    chain_entry_size=getattr(projection, "chain_entry_size", None))
 
                 for ocg_type, ocg_payload in msgs:
                     raw_msg = bytes([ocg_type]) + ocg_payload
@@ -630,6 +645,8 @@ class GalateaLink:
                         self.ignore_actions_blacklist = []
                         self.ignore_choice_ids_blacklist = []
 
+                    if ocg_type == 162 and self.gamestate.online_projection.started:
+                        await self._invalidate_rebuilt_prompt()
                     self.gamestate.update(ocg_type, ocg_payload)
                     if (
                         ocg_type in INTERACTION_MESSAGE_TYPES
@@ -640,6 +657,8 @@ class GalateaLink:
                             self.gamestate.active_player,
                             source=f"interaction_{ocg_type}",
                         )
+                    if ocg_type in INTERACTION_MESSAGE_TYPES and getattr(self, '_feedback_task', None) is not None and self.decision_policy.should_run_core():
+                        self._cancel_feedback(invalidate=False)
                     snapshot = await self._prepare_prompt_snapshot(
                         ocg_type,
                         ocg_payload,
@@ -666,6 +685,25 @@ class GalateaLink:
             if msg_type == 0x01:
                 await self._abort_protocol_failure()
 
+    # 场面重建前取消旧推理并移除可被 Retry 复用的旧菜单，不重新启动会话
+    async def _invalidate_rebuilt_prompt(self):
+        self._cancel_feedback()
+        coordinator = getattr(self, 'decision_coordinator', None)
+        if coordinator is not None:
+            await coordinator.cancel_active()
+        self.last_prompt_type = None
+        self.last_prompt_msg = None
+        self.last_prompt_actions = None
+        self.last_decision = None
+        self.last_decision_choice_id = None
+        self.last_decision_source = None
+        self.ignore_actions_blacklist = []
+        self.ignore_choice_ids_blacklist = []
+        for name in ('_v4_projector', '_branch_retry'):
+            tracker = getattr(self, name, None)
+            if tracker is not None:
+                tracker.reset()
+
     # 中止已失去可信解析的连接并取消旧决策以免继续发送过期动作
     async def _abort_protocol_failure(self):
         self.gamestate.current_valid_actions = []
@@ -680,6 +718,8 @@ class GalateaLink:
 
     # 创建独立快照并提交后台决策任务
     async def _schedule_decision(self, msg_type, raw_msg, snapshot=None, *, engine_retry=False):
+        if getattr(self, '_feedback_task', None) is not None and self.decision_policy.should_run_core():
+            self._cancel_feedback(invalidate=False)
         self.last_prompt_actions = copy.deepcopy(getattr(self.gamestate, "current_valid_actions", ()))
         snap = snapshot or self.gamestate.get_snapshot()
         self._prepare_core_retry(snap, msg_type, raw_msg, engine_retry=engine_retry)
@@ -745,6 +785,7 @@ class GalateaLink:
         loop = asyncio.get_running_loop()
         should_score_with_core = (
             self.decision_policy.should_run_core()
+            and not self._feedback_busy()
             and getattr(self.ai, "model_available", False)
             and not getattr(self, "_core_circuit_breaker_reason", None)
         )
@@ -865,6 +906,116 @@ class GalateaLink:
                 },
             )
 
+    # 判断旁路线程是否仍占用模型，避免主操作排队等待不可中断的旧计算
+    def _feedback_busy(self):
+        future = getattr(self, '_feedback_future', None)
+        return future is not None and not future.done()
+
+    # 取消后台调度但保留运行中线程的占用标记，过期结果不回写状态
+    def _cancel_feedback(self, *, invalidate=True):
+        task = getattr(self, '_feedback_task', None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._feedback_task = None
+        self._feedback_pending = None
+        history = getattr(self, 'model_feedback', None)
+        if invalidate and history is not None:
+            history.reset(clear=False)
+
+    # 外部开关立即停止新增采样，不改变 Core 或 LLM 的决策模式
+    def _feedback_controls_changed(self):
+        config = self.decision_policy.config
+        if not config.core_feedback_enabled or not config.core_feedback_passive_enabled:
+            self._cancel_feedback()
+
+    # 返回有界预测副本，读取接口不加载模型也不触发前向运算
+    def get_model_feedback(self):
+        config = self.decision_policy.config
+        history = getattr(self, 'model_feedback', None) or ModelFeedbackHistory()
+        projection = self.gamestate.online_projection
+        report = history.snapshot(state_sequence=projection.sequence,
+            active=bool(getattr(self, 'duel_active', False)), enabled=config.core_feedback_enabled,
+            passive_enabled=config.core_feedback_passive_enabled)
+        report['model_available'] = bool(getattr(self.ai, 'model_available', False))
+        report['model_protocol_version'] = getattr(self.ai, 'model_protocol_version', None)
+        report['passive_busy'] = self._feedback_busy()
+        return report
+
+    # 只在请求仍有效时发布反馈，不保存输入卡片或替另一个玩家生成预测
+    def _record_model_feedback(self, evaluation, snapshot, *, source, request_id=None):
+        history = getattr(self, 'model_feedback', None)
+        if history is None or not self.decision_policy.config.core_feedback_enabled:
+            return
+        if evaluation.get('discounted_value') is None and evaluation.get('probabilities') is None:
+            history.last_error = '模型未提供有限的反馈输出'
+            return
+        coordinator = getattr(self, 'decision_coordinator', None)
+        if request_id is not None and coordinator is not None and coordinator.active_request_id != request_id:
+            return
+        point = history.record(evaluation, snapshot, getattr(self.ai, 'model_metadata', None) or {},
+            source=source, request_id=request_id)
+        if point is not None:
+            self._publish_event('model.feedback.updated', {'point': point})
+
+    # 合并连续公开刷新，只给已绑定的实际决斗者调度独立场面评测
+    def _schedule_feedback(self, snapshot, event_type):
+        history = getattr(self, 'model_feedback', None)
+        if history is None:
+            return
+        coverage = getattr(snapshot, 'online_coverage', {})
+        if event_type == 4 and coverage.get('sequence') == 1:
+            history.reset()
+        config = self.decision_policy.config
+        if not (config.core_feedback_enabled and config.core_feedback_passive_enabled
+                and getattr(self.ai, 'model_protocol_version', None) == 4
+                and not getattr(self, '_core_circuit_breaker_reason', None)
+                and self.ai.model_available and coverage.get('started')
+                and getattr(self, 'ai_player_id', None) in (0, 1)):
+            return
+        if event_type in INTERACTION_MESSAGE_TYPES and self.decision_policy.should_run_core():
+            return
+        self._feedback_pending = snapshot
+        if getattr(self, '_feedback_task', None) is None or self._feedback_task.done():
+            self._feedback_task = asyncio.create_task(self._run_feedback())
+
+    # 节流评测与真实决策串行使用模型，超时后不继续排队并丢弃旧状态结果
+    async def _run_feedback(self):
+        loop = asyncio.get_running_loop()
+        history = self.model_feedback
+        epoch = history.epoch
+        try:
+            while self._feedback_pending is not None:
+                await asyncio.sleep(FEEDBACK_SAMPLE_INTERVAL)
+                if getattr(self, '_core_circuit_breaker_reason', None):
+                    return
+                if self._feedback_busy():
+                    return
+                coordinator = getattr(self, 'decision_coordinator', None)
+                if coordinator is not None and coordinator.active_request_id is not None and self.decision_policy.should_run_core():
+                    continue
+                snapshot, self._feedback_pending = self._feedback_pending, None
+                perspective = snapshot.online_coverage['perspective']
+                future = loop.run_in_executor(self.policy_executor,
+                    functools.partial(self.ai.get_state_evaluation_from_snapshot, snapshot, perspective))
+                self._feedback_future = future
+                # 即使等待超时，仍消费线程错误并保留未完成的占用标记
+                def consume_error(completed):
+                    if not completed.cancelled():
+                        completed.exception()
+                future.add_done_callback(consume_error)
+                try:
+                    evaluation = await asyncio.wait_for(asyncio.shield(future),
+                        min(2.0, self.decision_policy.config.core_time_budget))
+                except TimeoutError:
+                    history.last_error = '旁路评测超时，已停止等待'
+                    return
+                if history.epoch == epoch and snapshot.online_coverage['sequence'] == self.gamestate.online_projection.sequence:
+                    self._record_model_feedback(evaluation, snapshot, source='passive')
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            history.last_error = '当前场面或模型不支持这次旁路评测'
+
     # 保存每条游戏消息处理后的 LLM 可见观察
     def _capture_llm_observation(self, event_type, snapshot):
         self.observation_sequence += 1
@@ -886,6 +1037,7 @@ class GalateaLink:
             ),
         }
         self.latest_observation = observation
+        self._schedule_feedback(snapshot, event_type)
         self._update_v4_diagnostics(snapshot, event_type)
         self._publish_event(
             "observation.updated",
@@ -1188,6 +1340,7 @@ class GalateaLink:
 
     # 重置单局状态并让未完成的旧决策失效
     async def _reset_duel_state(self):
+        self._cancel_feedback()
         await self.decision_coordinator.cancel_active()
         self.gamestate.reset()
         if getattr(self, "_v4_projector", None) is not None:
@@ -1351,6 +1504,8 @@ class GalateaLink:
 
     # 在线程池中计算带概率信息的 Core 建议
     async def _compute_core_decision(self, request: DecisionRequest):
+        if self._feedback_busy():
+            return None
         if (
             not getattr(self.ai, "model_available", False)
             or getattr(self, "_core_circuit_breaker_reason", None)
@@ -1362,6 +1517,8 @@ class GalateaLink:
             soft = getattr(request.snapshot, "core_soft_banned_choice_ids", ())
             if hard or soft:
                 retry_options = {"excluded_choice_ids": hard, "soft_excluded_choice_ids": soft}
+            if getattr(self.ai, 'model_protocol_version', None) == 4 and self.decision_policy.config.core_feedback_enabled:
+                retry_options['collect_feedback'] = True
             loop = asyncio.get_running_loop()
             async with asyncio.timeout(
                 self.decision_policy.config.core_time_budget
@@ -1379,6 +1536,9 @@ class GalateaLink:
                 )
                 if decision is not None:
                     request.snapshot.core_retry_available_choice_ids = getattr(decision, "available_choice_ids", None) or None
+                    feedback = getattr(decision, 'feedback', None)
+                    if isinstance(feedback, dict):
+                        self._record_model_feedback(feedback, request.snapshot, source='decision_shared', request_id=request.request_id)
                 return decision
         except TimeoutError:
             self._trip_core_circuit_breaker(
@@ -1587,5 +1747,7 @@ def create_link_from_config(config: AppConfig) -> GalateaLink:
 
 
 if __name__ == "__main__":
+    from core.protocol_warnings import configure_protocol_warning_log
+    configure_protocol_warning_log(LINK_DATA_ROOT)
     link = create_link_from_config(load_app_config())
     asyncio.run(link.start())

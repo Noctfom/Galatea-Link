@@ -199,9 +199,19 @@ async def handle_capabilities(request: web.Request) -> web.Response:
             "link_version": __version__,
             "stable_model_protocols": [3],
             "preview_model_protocols": [4],
-            "model_protocol_readiness": {"4": {"asset_import": True, "offline_inference": True, "online_inference": False, "reason": "awaiting_link_v4_observation_validation", "observation_diagnostics": True}},
+            "model_protocol_readiness": {"4": {"asset_import": True, "offline_inference": True,
+                "online_inference": True, "online_inference_mode": "player_view_compatible_v1",
+                "history_policy": "masked_unavailable", "native_observation_complete": False,
+                "spectator_evaluation": False, "observation_diagnostics": True}},
             "game_protocol_profile": "ygopro",
             "game_protocol_family": "ygopro",
+            "online_observation": {"scope": "player_view", "field_reload": True,
+                "field_reload_layout": "ygopro_fixed_7_8", "field_reload_card_identity": False,
+                "spectator_seat": False},
+            "model_feedback": {"endpoint": "/api/v1/model-feedback", "decision_reuse": True,
+                "model_protocols": [4],
+                "passive_player_view": True, "terminal_predictions": "when_runtime_exports_head",
+                "calibration": "uncalibrated", "spectator": False},
             "known_compatible_clients": ["mdpro3"],
             "transports": ["http", "websocket"],
             "model_management": {
@@ -210,6 +220,7 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "gkg_import": True,
                 "gkg_package_format_versions": [2, 4, 5],
                 "gkg_optional_content": "archive_only",
+                "gkg_deck_import": "explicit_local_copy",
                 "v4_observation_diagnostics_endpoint": "/api/v1/models/diagnostics/v4",
             },
             "asset_management": {
@@ -284,6 +295,12 @@ async def handle_auth_session(request: web.Request) -> web.Response:
 # 返回当前服务会话和游戏运行时状态
 async def handle_status(request: web.Request) -> web.Response:
     return _json_response(request.app[MANAGER_KEY].get_status())
+
+
+# 返回当前会话或上局缓存的模型反馈
+async def handle_model_feedback(request: web.Request) -> web.Response:
+    # 返回脱敏的共享反馈数据，不执行或等待模型推理
+    return _json_response(request.app[MANAGER_KEY].get_model_feedback())
 
 
 # 接收 AstrBot 插件心跳并返回 Link 会话状态
@@ -563,6 +580,15 @@ async def handle_model_local_import(request: web.Request) -> web.Response:
         filename,
         activate=activate,
     )
+    return _json_response(result, status=201)
+
+
+# 按明确选择将已核验的包内卡组复制到本地仓库
+async def handle_package_decks_import(request: web.Request) -> web.Response:
+    payload = await _read_json_mapping(request)
+    if set(payload) != {"archive_id"}:
+        raise ApiRequestError("invalid_package_decks", "只允许提供 archive_id")
+    result = await request.app[MANAGER_KEY].import_package_decks(payload["archive_id"])
     return _json_response(result, status=201)
 
 
@@ -852,6 +878,7 @@ def create_http_app(
             web.get("/api/v1/capabilities", handle_capabilities),
             web.post("/api/v1/auth/session", handle_auth_session),
             web.get("/api/v1/status", handle_status),
+            web.get("/api/v1/model-feedback", handle_model_feedback),
             web.post("/api/v1/integrations/astrbot/heartbeat", handle_astrbot_heartbeat),
             web.post("/api/v1/integrations/dsh/heartbeat", handle_dsh_heartbeat),
             web.post("/api/v1/session/start", handle_session_start),
@@ -878,6 +905,7 @@ def create_http_app(
             web.patch("/api/v1/models/selection", handle_model_selection_patch),
             web.post("/api/v1/models/import", handle_model_upload_import),
             web.post("/api/v1/models/import-local", handle_model_local_import),
+            web.post("/api/v1/models/import-decks", handle_package_decks_import),
             web.get("/api/v1/assets", handle_assets_get),
             web.post("/api/v1/assets/card-data/sync", handle_card_data_sync),
             web.post("/api/v1/assets/semantics/sync", handle_semantic_assets_sync),
@@ -906,6 +934,9 @@ def create_http_app(
 
 # 从 YAML 配置启动独立 Link 网络服务
 def run_http_service(config_path: str | Path = "config.yaml") -> None:
+    from app_config import LINK_DATA_ROOT
+    from core.protocol_warnings import configure_protocol_warning_log
+    configure_protocol_warning_log(LINK_DATA_ROOT)
     resolved_path = Path(config_path).expanduser().resolve()
     app_config = load_app_config(resolved_path)
     manager = LinkSessionManager(resolved_path)

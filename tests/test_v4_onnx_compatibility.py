@@ -59,7 +59,7 @@ def test_stale_onnx_loads_and_preserves_frozen_semantics(tmp_path):
     snapshot.entities[0].code = 46986414
     assert backend.encoder.encode(snapshot, 0)["card_idx"][0, 0] == new.vocabulary.unknown_id
     assert hashlib.sha256(path.read_bytes()).hexdigest() == original
-    assert backend.metadata["online_inference_ready"] is False
+    assert backend.metadata["online_inference_ready"] is True
 
 
 # ONNX 仅词表追加也会给出知识滞后警告，编号错位仍不能混用

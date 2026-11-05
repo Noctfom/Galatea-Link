@@ -22,8 +22,8 @@ class OCGParserTests(unittest.TestCase):
         self.assertEqual(messages[0], (13, bytes([0, 1, 0, 0, 0])))
         self.assertEqual(messages[1], (40, b"\x01"))
 
-    # 验证 Link 的确认卡片消息不会吞掉 Core 本地幽灵字节
-    def test_confirm_cards_uses_standard_network_layout(self):
+    # 保留无面板标志的旧版网络确认布局，后续消息仍独立拆分
+    def test_confirm_cards_uses_legacy_network_layout(self):
         card_entry = struct.pack("<I", 12345678) + bytes([0, 2, 0])
         data = bytes([31, 0, 1]) + card_entry + bytes([40, 1])
 
@@ -32,8 +32,8 @@ class OCGParserTests(unittest.TestCase):
         self.assertEqual(messages[0], (31, bytes([0, 1]) + card_entry))
         self.assertEqual(messages[1], (40, b"\x01"))
 
-    # 验证 Link 的连锁选项之间不会解析 Core 本地定界字节
-    def test_select_chain_uses_standard_network_layout(self):
+    # 保留旧版全局强制标志与十三字节连锁候选布局兼容
+    def test_select_chain_uses_legacy_network_layout(self):
         option = bytes([1]) + struct.pack("<I", 12345678)
         option += bytes([4, 0, 1]) + struct.pack("<I", 9) + bytes([0])
         payload = bytes([0, 1, 0]) + bytes(8) + option

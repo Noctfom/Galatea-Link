@@ -1,4 +1,4 @@
-# V4 编码器运行包装，纯 NumPy 构造完整离线快照输入并拒绝旧在线快照
+# V4 编码器运行包装，支持原生离线输入和明确标注历史缺失的在线兼容输入
 
 import numpy as np
 
@@ -11,19 +11,51 @@ class GalateaEncoder:
     # 为单个模型绑定独立词表语义和静态卡组缓存
     def __init__(self, assets, *, frozen_card_count=None):
         self.assets = assets
+        self.last_online_report = None
         with use_assets(assets):
             vocabulary = assets.vocabulary if frozen_card_count is None else assets.vocabulary.prefix(frozen_card_count)
             self.encoder = CoreV4NumpyEncoder(card_vocabulary=vocabulary)
 
-    # 仅编码 V4 完整快照且不接受当前 Link 的不完整在线状态
+    # 原生快照保持原合同，Link 玩家快照通过独立兼容路径编码
     def encode(self, snapshot, player_id, *, output_format="numpy"):
         if not isinstance(snapshot, GameSnapshot):
-            raise ValueError("V4 在线观测合同尚未验收，不能将旧在线快照补零编码")
+            return self.encode_online(snapshot, player_id, output_format=output_format)
         if hasattr(snapshot, "_link_v4_projection"):
             raise ValueError("V4 在线诊断投影尚未验收，不能作为正常推理输入")
         with use_assets(self.assets):
             arrays = self.encoder.encode(snapshot, player_id)
         arrays = {key: np.ascontiguousarray(value) for key, value in arrays.items()}
+        if output_format == "numpy":
+            return arrays
+        if output_format != "torch":
+            raise ValueError("V4 编码输出必须是 numpy 或 torch")
+        import torch
+        return {key: torch.from_numpy(value) for key, value in arrays.items()}
+
+    # 编码实际玩家观测并保存兼容报告，诊断投影不能直接用于推理
+    def encode_online(self, snapshot, player_id, *, output_format="numpy", state_evaluation=False):
+        from data_types import GameSnapshot as LinkSnapshot
+        from .live_adapter import HISTORY_POLICY, ONLINE_MODE, prepare_online_input
+        if not isinstance(snapshot, LinkSnapshot):
+            raise ValueError("V4 在线兼容输入只接受 Link 对局玩家快照")
+        try:
+            prepared = prepare_online_input(snapshot, player_id, state_evaluation=state_evaluation)
+        except ValueError as error:
+            self.last_online_report = {"schema_version": "galatea.v4_online_input.v1", "mode": ONLINE_MODE,
+                "history_policy": HISTORY_POLICY, "ready": False, "blocking_reasons": [str(error)]}
+            raise
+        self.last_online_report = prepared.report
+        if prepared.snapshot is None:
+            raise ValueError("V4 在线观测合同缺少可用输入: " + ", ".join(prepared.report["blocking_reasons"]))
+        try:
+            arrays = self.encode(prepared.snapshot, player_id, output_format="numpy")
+        except (ValueError, TypeError, IndexError) as error:
+            self.last_online_report = {**prepared.report, "ready": False,
+                "blocking_reasons": ["encoding_failed"], "error": str(error)}
+            raise
+        if any(not np.isfinite(value).all() for value in arrays.values() if value.dtype.kind == "f"):
+            self.last_online_report = {**prepared.report, "ready": False, "blocking_reasons": ["nonfinite_model_input"]}
+            raise ValueError("V4 在线兼容输入包含非有限数值")
         if output_format == "numpy":
             return arrays
         if output_format != "torch":

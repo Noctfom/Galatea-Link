@@ -38,6 +38,8 @@ def normalize_modes(values: Iterable[str]) -> tuple[str, ...]:
 
 # 校验决策控制配置的范围和依赖关系
 def validate_decision_controls(config: Any) -> None:
+    if type(config.core_feedback_enabled) is not bool or type(config.core_feedback_passive_enabled) is not bool:
+        raise ValueError('模型反馈开关必须是布尔值')
     if config.mode not in VALID_INTERVENTION_MODES:
         raise ValueError(f"不支持的介入模式: {config.mode}")
     if config.agent_backend not in VALID_AGENT_BACKENDS:
@@ -100,6 +102,8 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         "force_llm_message_types",
         "include_core_suggestion",
         "core_time_budget",
+        "core_feedback_enabled",
+        "core_feedback_passive_enabled",
         "llm_time_budget",
     }
     allowed_autonomy = {
@@ -114,6 +118,11 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         raise ValueError("宏观控制补丁包含未知字段")
 
     replacements = {}
+    for name in ('core_feedback_enabled', 'core_feedback_passive_enabled'):
+        if name in intervention:
+            if type(intervention[name]) is not bool:
+                raise ValueError('模型反馈开关必须是布尔值')
+            replacements[name] = intervention[name]
     if "core_loop_retry_enabled" in intervention:
         if type(intervention["core_loop_retry_enabled"]) is not bool:
             raise ValueError("core_loop_retry_enabled 必须为布尔值")
@@ -263,6 +272,8 @@ def intervention_payload(config: Any) -> dict[str, Any]:
         "force_llm_message_types": list(config.force_llm_message_types),
         "include_core_suggestion": config.include_core_suggestion,
         "core_time_budget": config.core_time_budget,
+        "core_feedback_enabled": config.core_feedback_enabled,
+        "core_feedback_passive_enabled": config.core_feedback_passive_enabled,
         "llm_time_budget": config.llm_time_budget,
     }
 
