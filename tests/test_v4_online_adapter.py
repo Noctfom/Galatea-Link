@@ -110,7 +110,7 @@ def test_projection_matches_readonly_core_snapshot_and_encoder(tmp_path, player)
     encoder = GalateaEncoder(write_v4_assets(tmp_path / "assets"))
     report = encoder.audit_projection(projection, reference, player)
     assert report["all_fields_equal"], report["different_fields"]
-    assert report["field_count"] == 108
+    assert report["field_count"] == 116
     assert report["grants_inference_permission"] is False
 
 

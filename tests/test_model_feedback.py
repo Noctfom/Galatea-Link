@@ -114,12 +114,19 @@ def test_feedback_history_is_bounded_and_explicit_about_staleness():
         history.record(serialize_model_evaluation([[sequence]]), source, {}, source='decision_shared')
     report = history.snapshot(state_sequence=149, active=True)
     assert len(report['history']) == 128 and report['current']
+    assert report['total_samples'] == 150
+    assert [point['sample_id'] for point in report['history']] == list(range(23, 151))
+    series_id = report['series_id']
+    history.record(serialize_model_evaluation([[151]]), source, {}, source='decision_shared')
+    assert history.total_samples == 150 and history.points[-1]['sample_id'] == 150
     report['latest']['discounted_value'] = -999
-    assert history.points[-1]['discounted_value'] == 149
+    assert history.points[-1]['discounted_value'] == 151
     assert not history.snapshot(state_sequence=150, active=True)['current']
     epoch = history.epoch
     history.reset(clear=False)
     assert history.epoch == epoch + 1 and history.points
+    history.reset()
+    assert not history.points and history.total_samples == 0 and history.series_id != series_id
 
 
 # 创建只拥有真实反馈调度与单线程模型池的隔离 Link

@@ -42,7 +42,7 @@ def test_player_view_encodes_with_masked_transition_history(tmp_path, player):
     actions = deepcopy(source.valid_actions)
     encoder = GalateaEncoder(write_v4_assets(tmp_path / "assets"))
     arrays = encoder.encode(source, player)
-    assert len(arrays) == 108 and not arrays["event_mask"].any()
+    assert len(arrays) == 116 and not arrays["event_mask"].any()
     assert arrays["act_mask"].sum() == len(source.valid_actions)
     assert source.valid_actions == actions and len(source.observed_transitions) == 1
     assert encoder.last_online_report["ready"] is True
@@ -162,11 +162,12 @@ def test_empty_field_still_uses_v4_model(tmp_path):
 
 # 本机 TCP 模拟开局连锁及连续三阶段提示，确认实际 V4 推理产出协议响应而不调用规则回退
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend,player", [("pytorch", 0), ("onnxruntime", 1)])
+@pytest.mark.parametrize("backend,player", [("pytorch", 0), ("onnxruntime", 1), ("onnx_revision14", 0)])
 @pytest.mark.parametrize("opening", ["yes_no", "chain"])
 async def test_v4_tcp_duel_loop_uses_model_across_prompt_stages(tmp_path, monkeypatch, backend, player, opening):
     assets = write_v4_assets(tmp_path / "assets")
-    path, _ = write_v4_checkpoint(tmp_path, assets) if backend == "pytorch" else frozen_graph(tmp_path, assets)
+    path, _ = write_v4_checkpoint(tmp_path, assets) if backend == "pytorch" else frozen_graph(tmp_path, assets,
+        schema_revision=14 if backend == "onnx_revision14" else 15)
     (tmp_path / "decks").mkdir()
     (tmp_path / "decks/test.ydk").write_text("#main\n14558127\n89631139\n#extra\n89631139\n!side\n", encoding="utf-8")
     monkeypatch.setattr("galatea_link.LINK_DATA_ROOT", tmp_path)
@@ -217,6 +218,17 @@ async def test_v4_tcp_duel_loop_uses_model_across_prompt_stages(tmp_path, monkey
                     writer.write(build_packet(1, bytes([7, 1 - player, 2, 0]) + padded_code_row()))
                     writer.write(build_packet(1, wide_hint_packet(player)))
                     writer.write(build_packet(1, confirmation_packet(player, skip_panel=1)))
+                    # 增量连锁状态与公开指示进入第二次推理，旧图继续使用原输入合同
+                    writer.write(build_packet(1, bytes([70]) + struct.pack('<IIBBBIB', 14558127,
+                        player | 4 << 8 | 1 << 24, player, 4, 0, 123, 1)))
+                    writer.write(build_packet(1, bytes([71, 1])))
+                    writer.write(build_packet(1, bytes([83, 1]) + struct.pack('<I', player | 4 << 8 | 1 << 24)))
+                    writer.write(build_packet(1, bytes([72, 1])))
+                    # 连续区域查询失效后序号为None，紧随的公开指示仍应继续处理
+                    writer.write(build_packet(1, bytes([50]) + struct.pack('<IIII', 46986414,
+                        player | 4 << 8 | 2 << 16 | 1 << 24, player | 2 << 8 | 5 << 16, 0)))
+                    writer.write(build_packet(1, bytes([83, 1]) + struct.pack('<I', player | 2 << 8)))
+                    writer.write(build_packet(1, bytes([2, 11, player]) + struct.pack('<I', 9001)))
                     # 强制标志属于候选，特殊候选数为零仍不允许返回取消
                     writer.write(build_packet(1, chain_packet(player, special_count=0,
                         candidates=[(0, 1, 14558127, player | 4 << 8 | 1 << 24, 0x16020304)])))
@@ -249,10 +261,14 @@ async def test_v4_tcp_duel_loop_uses_model_across_prompt_stages(tmp_path, monkey
     rule = AsyncMock(side_effect=AssertionError("V4 测试不应使用规则回退"))
     link._compute_rule_decision = rule
     events = []
+    contexts = []
     publish = link._publish_event
     # 在不替换事件总线的前提下记录决策来源
     def capture(kind, payload=None):
         events.append(kind)
+        if kind == 'core.suggested':
+            snap = link.gamestate.get_snapshot()
+            contexts.append((len(snap.prompt_context), len(snap.chain_stack), snap.resolving_chain_index))
         return publish(kind, payload)
     link._publish_event = capture
     task = asyncio.create_task(link.start())
@@ -266,6 +282,8 @@ async def test_v4_tcp_duel_loop_uses_model_across_prompt_stages(tmp_path, monkey
         assert feedback['latest']['source'] == 'decision_shared'
         assert (feedback['latest']['probabilities'] is not None) == (backend == 'pytorch')
         assert "message.processing_failed" not in events
+        assert contexts[1] == (2, 1, 1) and contexts[2] == (0, 0, 0)
+        assert link.ai.model_metadata['observation_compatibility']['input_count'] == (108 if backend == 'onnx_revision14' else 116)
         assert len(link.gamestate.field_map[1 - player][2]) == 5
         assert link.gamestate.online_projection.compatibility_warning_counts["query_extra_bytes"] == 1
         assert link.gamestate.online_projection.compatibility_warning_counts["message_wide_hint"] == 1

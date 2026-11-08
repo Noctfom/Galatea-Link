@@ -53,15 +53,15 @@ class V4Assets:
             if frozen_onnx:
                 # 冻结图使用导出时语义，仅放宽外部内容哈希，保留结构与卡片编号前缀校验
                 candidate = {**metadata, "semantic_lookup_hash": self.lookup.prefix_hash(metadata["card_vocab_card_count"])}
-                return validate_protocol_metadata(candidate, label=label, card_vocabulary=self.vocabulary)
+                return validate_protocol_metadata(candidate, label=label, card_vocabulary=self.vocabulary, allow_observation_updates=True)
             if allow_semantic_updates and metadata.get("semantic_lookup_hash") != self.lookup.prefix_hash(metadata["card_vocab_card_count"]):
                 # 先按实际语义哈希校验其他所有协议字段，再验证旧语义坐标系证据
                 candidate = {**metadata, "semantic_lookup_hash": self.lookup.prefix_hash(metadata["card_vocab_card_count"])}
-                validate_protocol_metadata(candidate, label=label, card_vocabulary=self.vocabulary)
+                validate_protocol_metadata(candidate, label=label, card_vocabulary=self.vocabulary, allow_observation_updates=True)
                 from .semantic_compatibility import validate_semantic_update_compatibility
                 validate_semantic_update_compatibility(metadata, self.lookup, directory=self.root)
                 return dict(self.identity)
-            return validate_protocol_metadata(metadata, label=label, card_vocabulary=self.vocabulary)
+            return validate_protocol_metadata(metadata, label=label, card_vocabulary=self.vocabulary, allow_observation_updates=True)
 
     # 报告旧 ONNX 与新资产的内容差异，不宣称冻结图获得了新知识
     def onnx_compatibility(self, metadata):
@@ -124,7 +124,7 @@ def inspect_protocol_identity(metadata):
     for key in ("model_protocol_version", "protocol_schema_revision", "card_vocab_size", "card_vocab_card_count", "semantic_lookup_format_version", "semantic_lookup_card_count"):
         if type(metadata[key]) is not int or metadata[key] < 0:
             raise ValueError(f"V4 协议字段类型无效: {key}")
-    if metadata["model_protocol_version"] != MODEL_PROTOCOL_VERSION or metadata["protocol_schema_revision"] != PROTOCOL_SCHEMA_REVISION:
+    if metadata["model_protocol_version"] != MODEL_PROTOCOL_VERSION or metadata["protocol_schema_revision"] not in (14, PROTOCOL_SCHEMA_REVISION):
         raise ValueError("V4 观测结构修订不受支持")
     if metadata["semantic_lookup_format_version"] != 1 or metadata["card_vocab_card_count"] != metadata["semantic_lookup_card_count"]:
         raise ValueError("V4 语义与词表协议不一致")
@@ -136,9 +136,11 @@ def inspect_protocol_identity(metadata):
             raise ValueError(f"V4 摘要无效: {key}")
     # 结构身份只依赖固定字段与词表容量，不依赖词表内容或语义大表
     from types import SimpleNamespace
-    from .protocol_schema import _schema_descriptor
+    from .protocol_schema import _schema_descriptor, _revision_14_schema_hash
     descriptor = _schema_descriptor(SimpleNamespace(capacity=metadata["card_vocab_size"]))
     expected = hashlib.sha256(json.dumps(descriptor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if metadata["protocol_schema_revision"] == 14:
+        expected = _revision_14_schema_hash(SimpleNamespace(capacity=metadata["card_vocab_size"]))
     if metadata["protocol_schema_hash"] != expected:
         raise ValueError("V4 protocol_schema_hash 与固定字段合同不一致")
     return {key: metadata[key] for key in PROTOCOL_IDENTITY_KEYS}

@@ -136,7 +136,7 @@ def test_final_macro_inputs_match_readonly_core(tmp_path, name, player):
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projected, reference, player)
     assert len(actions) == len(reference.valid_actions) == len(responses)
     assert report["all_fields_equal"], report["different_fields"]
-    assert report["field_count"] == 108
+    assert report["field_count"] == 116
     assert not report["grants_inference_permission"]
 
 

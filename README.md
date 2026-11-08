@@ -4,7 +4,7 @@
 
 # Galatea Link
 
-![版本](https://img.shields.io/badge/Link-3.4.0-6b8f71)
+![版本](https://img.shields.io/badge/Link-3.5.1-6b8f71)
 
 </div>
 
@@ -29,6 +29,9 @@ Link模块已开发独立移动端分支项目[Galatea-Link-mobile](https://gith
 - 玩家可见观察、远程合法动作提交、运行时控制、WebSocket 事件流和低开销赛后摘要
 - Link 独立处理服务器卡片与玩家提示、错过发动时点和公开卡组位置，供本地及远程 LLM 使用
 - WebUI 可导出不含卡密、卡组或响应字节的 V4 输入覆盖报告，V3 与仅 LLM 对局也能采集
+- V4 [当前询问与逐链上下文](docs/V4_CURRENT_CONTEXT.md)兼容观测修订 14／15，旧 ONNX 保留原图，旧 PTH 可保留权重采用新观测
+- [模型反馈](docs/MODEL_FEEDBACK.md)可复用局内推理或开启旁路评测，展示实际可用的预测和固定采样窗口曲线
+- [服务器观众席](docs/SPECTATOR.md)可独立加入观战，使用双方公开场面做 V4 旁路评测，并切换参照玩家
 - 浅色/深色 WebUI，可配置连接、模型、LLM、决策策略、运行资产和游戏聊天
 - Link 本地卡组仓库，可导入、查看、选择、单卡调整和安全删除 YDK
 - 卡库、Lua 脚本、语义资产同步，以及 MSG 142 宣言兜底池管理

@@ -40,6 +40,8 @@ def normalize_modes(values: Iterable[str]) -> tuple[str, ...]:
 def validate_decision_controls(config: Any) -> None:
     if type(config.core_feedback_enabled) is not bool or type(config.core_feedback_passive_enabled) is not bool:
         raise ValueError('模型反馈开关必须是布尔值')
+    if type(config.core_feedback_spectator_player) is not int or config.core_feedback_spectator_player not in (0, 1):
+        raise ValueError('观众评测参照玩家必须为 0 或 1')
     if config.mode not in VALID_INTERVENTION_MODES:
         raise ValueError(f"不支持的介入模式: {config.mode}")
     if config.agent_backend not in VALID_AGENT_BACKENDS:
@@ -104,6 +106,7 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         "core_time_budget",
         "core_feedback_enabled",
         "core_feedback_passive_enabled",
+        "core_feedback_spectator_player",
         "llm_time_budget",
     }
     allowed_autonomy = {
@@ -118,6 +121,8 @@ def apply_decision_control_patch(config: Any, patch: Mapping[str, Any]) -> Any:
         raise ValueError("宏观控制补丁包含未知字段")
 
     replacements = {}
+    if 'core_feedback_spectator_player' in intervention:
+        replacements['core_feedback_spectator_player'] = intervention['core_feedback_spectator_player']
     for name in ('core_feedback_enabled', 'core_feedback_passive_enabled'):
         if name in intervention:
             if type(intervention[name]) is not bool:
@@ -274,6 +279,7 @@ def intervention_payload(config: Any) -> dict[str, Any]:
         "core_time_budget": config.core_time_budget,
         "core_feedback_enabled": config.core_feedback_enabled,
         "core_feedback_passive_enabled": config.core_feedback_passive_enabled,
+        "core_feedback_spectator_player": config.core_feedback_spectator_player,
         "llm_time_budget": config.llm_time_budget,
     }
 

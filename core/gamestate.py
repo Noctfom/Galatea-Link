@@ -9,7 +9,7 @@ import traceback
 import json
 import os
 from pathlib import Path
-from copy import copy
+from copy import copy, deepcopy
 from game_constants import LocationInfo, Zone, Phases
 from collections import defaultdict
 from utils.card_reader import card_db
@@ -28,6 +28,7 @@ from core.selection_protocol import SELECTION_MSGS, parse_selection_prompt, sele
 from core.confirmation_protocol import confirmation_payload_length, parse_online_confirmation
 from core.chain_protocol import chain_payload_length, parse_online_chain
 from core.reload_protocol import reload_payload_length, parse_online_reload
+from core.current_context import CurrentContextState
 
 INTERACTION_MESSAGE_TYPES = frozenset({
     10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
@@ -391,7 +392,7 @@ class MessageParser:
 #  DuelState V2.1 - 包含动作解析
 # ==================================================================================
 
-class DuelState:
+class DuelState(CurrentContextState):
     # [新增参数] 传入初始的主卡组和额外卡组
     def __init__(
         self,
@@ -401,6 +402,7 @@ class DuelState:
         p1_extra=None,
         model_protocol_version=1,
         asset_dir=None,
+        spectator=False,
     ):
         """初始化单局状态并记录当前模型动作协议"""
         self.entities = {}
@@ -426,9 +428,11 @@ class DuelState:
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
         self.model_protocol_version = int(model_protocol_version)
-        self.online_projection = OnlineStateProjection()
+        self.spectator = bool(spectator)
+        self.online_projection = OnlineStateProjection(spectator=self.spectator)
         self.response_history = OnlineResponseHistory()
         self.public_chain_progress = PublicChainProgress()
+        self._reset_current_context()
         self._action_prompt_type = None
         self._selection_prompt = None
         self._initial_decks = {0: (None if p0_main is None else tuple(p0_main), None if p0_extra is None else tuple(p0_extra)),
@@ -463,9 +467,12 @@ class DuelState:
         return list(DEFAULT_META_STAPLES)
 
     def reset(self):
-        self.online_projection = OnlineStateProjection()
+        confirmed = self.online_projection.spectator_confirmed
+        self.online_projection = OnlineStateProjection(spectator=self.spectator)
+        self.online_projection.spectator_confirmed = confirmed
         self.response_history.reset()
         self.public_chain_progress = PublicChainProgress()
+        self._reset_current_context()
         self._action_prompt_type = None
         self._selection_prompt = None
         self._initial_decks = {0: (None, None), 1: (None, None)}
@@ -488,13 +495,16 @@ class DuelState:
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
         if msg_type == 2:
-            # 纯提示不会替换操作菜单，宽提示数据也不作为新的状态字段猜测解析
+            # 提示补充可见上下文但保留正在等待的菜单，未映射值只警告
+            self._observe_current_context(msg_type, msg_payload)
+            self.online_projection.observe_event(msg_type, msg_payload)
             return
         if msg_type == 4:
             start = self.online_projection.start(msg_payload)
             if start is None:
                 return
-            self.response_history.bind(start["perspective"])
+            if not self.spectator:
+                self.response_history.bind(start["perspective"])
             self.my_lp, self.op_lp = start["lp"]
             return
         if msg_type in (6, 7):
@@ -502,6 +512,9 @@ class DuelState:
             return
         if msg_type == 162:
             self._restore_online_field(parse_online_reload(msg_payload))
+            return
+        if self.spectator and msg_type in INTERACTION_MESSAGE_TYPES | {1}:
+            self.online_projection.warn_compatibility("spectator_interaction_ignored", msg_type=msg_type)
             return
         if msg_type in INTERACTION_MESSAGE_TYPES and self.online_projection.started:
             if get_interaction_player_id(msg_type, msg_payload) != self.online_projection.perspective:
@@ -521,6 +534,7 @@ class DuelState:
             return
         try:
             stream = io.BytesIO(msg_payload)
+            self._observe_current_context(msg_type, msg_payload)
             
             # --- 状态维护 ---
             if msg_type in [30, 31, 42]:
@@ -650,6 +664,7 @@ class DuelState:
                         -1 if effect_slot_idx is None else effect_slot_idx
                     ),
                     'ct': ct,
+                    **self._initial_chain_context(),
                 })
                 self.public_chain_progress.begin(self.chain_stack[-1])
                 # 压入历史记事本 (最近发生的在最前面)
@@ -761,17 +776,18 @@ class DuelState:
             # 否则重演时无法用上一次的选项去验证人类的修正点击
             elif msg_type != 1 and msg_type not in AUXILIARY_MESSAGE_TYPES:
                 self.current_valid_actions = []
+            self._sync_current_context_progress()
             self.response_history.observe(msg_type, msg_payload, self.history_digest(),
                 interaction=msg_type in INTERACTION_MESSAGE_TYPES and not (msg_type == 16 and len(msg_payload) == 11 and msg_payload[1] == 0))
 
         except Exception as e:
-            print(f"⚠️ [GameState] update消息解析失败: {e}")
-            # 抛出异常，击毙这局烂尾游戏
-            raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+            print(f"⚠️ [GameState] Type {msg_type} 状态更新失败: {e}")
+            # 标明失败消息类型，不把状态维护错误一律误报为字节解析错位
+            raise RuntimeError(f"GameState Type {msg_type} 状态更新失败: {e}") from e
 
     # 原子重建快照可证明的占位和连锁，清除旧实例身份及未完成动作
     def _restore_online_field(self, restored):
-        if not self.online_projection.started:
+        if not self.online_projection.started and not (self.spectator and self.online_projection.spectator_confirmed):
             self.online_projection.warn_compatibility("reload_before_start")
             return
         new_field = {0: defaultdict(dict), 1: defaultdict(dict)}
@@ -800,7 +816,8 @@ class DuelState:
             slot = self.effect_slot_resolver(code & 0x7FFFFFFF, desc)
             chains.append({'code': code & 0x7FFFFFFF, 'hc': handler_c, 'hl': handler_l,
                 'hs': handler_s, 'hp': handler_p, 'c': player, 'l': zone, 's': sequence,
-                'desc': desc, 'effect_slot': slot if slot is not None else -1, 'ct': index})
+                'desc': desc, 'effect_slot': slot if slot is not None else -1, 'ct': index,
+                **self._initial_chain_context(known=False)})
         self.online_projection.restore_field(restored, facts)
         self.field_map, self.chain_stack = new_field, chains
         self.my_lp, self.op_lp = (data['lp'] for data in restored['players'])
@@ -813,6 +830,7 @@ class DuelState:
         self._action_prompt_type = None
         self.response_history.invalidate()
         self.public_chain_progress.restore(chains)
+        self._reset_current_context()
 
     # 固定本方初始构筑并与动态剩余库存分离
     def set_own_deck(self, player, main, extra):
@@ -1767,6 +1785,7 @@ class DuelState:
                 info["target_location_values"] = list(fields["target_locations"])
             updated[index] = info
         self.field_map[actor][zone] = updated
+        self._refresh_chain_target_identities(actor, zone, changes, full=msg_type == 6)
 
     def get_snapshot(self, env=None) -> GameSnapshot:
         """
@@ -1984,7 +2003,10 @@ class DuelState:
             p1_extra_codes=self.p1_extra.copy() 
         )
         # 动态外挂连锁堆栈
-        snap.chain_stack = self.chain_stack.copy()
+        snap.chain_stack = deepcopy(self.chain_stack)
+        snap.resolving_chain_index = self.resolving_chain_index
+        snap.recent_chain_targets = deepcopy(self.recent_chain_targets)
+        snap.prompt_context = self._snapshot_prompt_context()
         snap.history_stack = self.history_stack.copy()
         snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
         snap.online_coverage = self.online_projection.coverage()
@@ -2006,6 +2028,9 @@ class DuelState:
         snap.public_chain_progress = self.public_chain_progress.snapshot()
         snap.selection_context = selection_context(self._selection_prompt) if final_actions and self._selection_prompt else None
         snap.action_prompt_type = self._action_prompt_type if final_actions else None
+        if self.spectator:
+            from core.spectator_view import public_spectator_snapshot
+            return public_spectator_snapshot(snap)
         return snap
     
     def sync_active_field(self, env):

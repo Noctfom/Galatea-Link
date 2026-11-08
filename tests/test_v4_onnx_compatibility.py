@@ -15,9 +15,9 @@ from tests.v4_fixtures import write_v4_assets, v4_snapshot
 
 
 # 构造具有完整 V4 输入签名且冻结旧语义数值的轻量 ONNX 图
-def frozen_graph(root, assets):
+def frozen_graph(root, assets, *, schema_revision=15):
     onnx = pytest.importorskip("onnx")
-    arrays = GalateaEncoder(assets).encode(v4_snapshot(), 0)
+    arrays = GalateaEncoder(assets, schema_revision=schema_revision).encode(v4_snapshot(), 0)
     helper = onnx.helper
     inputs = [helper.make_tensor_value_info(name, helper.np_dtype_to_tensor_dtype(array.dtype), array.shape)
         for name, array in arrays.items()]
@@ -31,6 +31,9 @@ def frozen_graph(root, assets):
     graph.ir_version = 9
     metadata = {**assets.identity, "model_id": "00000000-0000-0000-0000-000000000404",
         "model_prefix": "galatea", "iteration": 1, "checkpoint_format_version": 3}
+    if schema_revision == 14:
+        from model_protocols.v4.protocol_schema import _revision_14_schema_hash
+        metadata.update(protocol_schema_revision=14, protocol_schema_hash=_revision_14_schema_hash(assets.vocabulary))
     helper.set_model_props(graph, {f"galatea.{key}": str(value) for key, value in metadata.items()})
     path = root / "galatea_iter_1.onnx"
     onnx.save(graph, path)

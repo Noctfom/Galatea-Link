@@ -99,6 +99,7 @@ class GalateaRuntimeApi:
                 ),
             },
             "duel_active": bool(getattr(self._link, "duel_active", False)),
+            "session_role": "spectator" if getattr(self._link, 'is_spectator', False) else "duelist",
             "lobby": {
                 "is_host": bool(getattr(self._link, "is_room_host", False)),
                 "duel_mode": int(getattr(self._link, "room_duel_mode", 0)),
@@ -141,6 +142,7 @@ class GalateaRuntimeApi:
                 ),
                 "metadata": model_metadata,
                 "online_input": copy.deepcopy(getattr(getattr(ai, "encoder", None), "last_online_report", None)),
+                "state_evaluation_input": copy.deepcopy(getattr(getattr(ai, "encoder", None), "last_state_evaluation_report", None)),
             },
             "decision": {
                 "mode": decision_config.mode,
@@ -206,8 +208,9 @@ class GalateaRuntimeApi:
     def get_v4_diagnostics(self):
         report = copy.deepcopy(getattr(self._link, "last_v4_diagnostics", None) or empty_v4_diagnostics())
         report["readiness_scope"] = "native_observation"
+        input_field = "last_state_evaluation_report" if getattr(self._link, 'is_spectator', False) else "last_online_report"
         report["online_compatibility"] = copy.deepcopy(getattr(
-            getattr(getattr(self._link, "ai", None), "encoder", None), "last_online_report", None))
+            getattr(getattr(self._link, "ai", None), "encoder", None), input_field, None))
         return report
 
     # 状态接口只携带小摘要，详细字段缺口通过专用接口读取
@@ -676,6 +679,7 @@ class GalateaRuntimeApi:
             "core_time_budget",
             "core_feedback_enabled",
             "core_feedback_passive_enabled",
+            "core_feedback_spectator_player",
             "llm_time_budget",
         }
         unknown_autonomy = set(autonomy) - {
@@ -690,6 +694,11 @@ class GalateaRuntimeApi:
             raise ValueError("宏观控制补丁包含未知字段")
 
         replacements = {}
+        if 'core_feedback_spectator_player' in intervention:
+            value = intervention['core_feedback_spectator_player']
+            if type(value) is not int or value not in (0, 1):
+                raise ValueError('观众评测参照玩家必须为 0 或 1')
+            replacements['core_feedback_spectator_player'] = value
         for name in ('core_feedback_enabled', 'core_feedback_passive_enabled'):
             if name in intervention:
                 if type(intervention[name]) is not bool:
@@ -837,6 +846,8 @@ class GalateaRuntimeApi:
 
     # 校验统一控制配置内部的范围和依赖关系
     def _validate_controls_config(self, config) -> None:
+        if type(config.core_feedback_spectator_player) is not int or config.core_feedback_spectator_player not in (0, 1):
+            raise ValueError('观众评测参照玩家必须为 0 或 1')
         if config.agent_backend not in {"local", "remote_astrbot", "remote_dsh"}:
             raise ValueError("智能体后端不受支持")
         if config.core_policy_mode not in {"greedy", "deployment"}:
@@ -931,6 +942,7 @@ class GalateaRuntimeApi:
             "core_time_budget": config.core_time_budget,
             "core_feedback_enabled": config.core_feedback_enabled,
             "core_feedback_passive_enabled": config.core_feedback_passive_enabled,
+            "core_feedback_spectator_player": config.core_feedback_spectator_player,
             "llm_time_budget": config.llm_time_budget,
         }
 

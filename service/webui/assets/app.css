@@ -17,6 +17,7 @@
   --accent-hover: #285e54;
   --accent-soft: #e4f0ec;
   --accent-text: #24574d;
+  --feedback-curve: #338c98;
   --danger: #a34747;
   --danger-hover: #8d3b3b;
   --danger-soft: #f8eaea;
@@ -43,6 +44,7 @@ body[data-theme="dark"] {
   --accent-hover: #86c4b5;
   --accent-soft: #263f38;
   --accent-text: #9dd1c4;
+  --feedback-curve: #83c1ca;
   --danger: #d77b7b;
   --danger-hover: #e18b8b;
   --danger-soft: #432b2b;
@@ -1821,14 +1823,19 @@ input[type="checkbox"] {
 .feedback-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; }
 .feedback-controls .switch-row { flex: 1 1 290px; }
 .feedback-metrics { margin-bottom: 20px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.feedback-chart-panel .panel-heading > select { width: auto; max-width: 260px; min-width: 180px; }
+.feedback-chart-options { display: flex; gap: 10px; flex-wrap: wrap; }
+.feedback-chart-options select { width: auto; max-width: 240px; min-width: 132px; }
 .feedback-chart-panel .panel-heading > div { flex: 1; }
+.feedback-chart-panel .panel-heading > .feedback-chart-options { flex: 0 1 auto; }
 .feedback-detail-grid { grid-template-columns: 1fr 1fr; }
-.feedback-chart { min-height: 250px; }
-.feedback-chart svg { display: block; width: 100%; height: 250px; }
-.feedback-chart .feedback-axis { stroke: var(--line); stroke-width: 1; }
-.feedback-chart .feedback-line { fill: none; stroke: var(--accent); stroke-width: 2; }
-.feedback-chart .feedback-point { fill: var(--accent); }
+.feedback-chart { min-height: 292px; }
+.feedback-chart svg { display: block; width: 100%; height: auto; min-height: 250px; overflow: visible; }
+.feedback-chart .feedback-grid { stroke: var(--line); stroke-width: 1; }
+.feedback-chart .feedback-grid-vertical { stroke-dasharray: 3 5; opacity: .6; }
+.feedback-chart .feedback-axis { stroke: var(--line-strong); stroke-width: 1; }
+.feedback-chart .feedback-line { fill: none; stroke: var(--feedback-curve); stroke-width: 2; stroke-linejoin: round; }
+.feedback-chart .feedback-point { fill: var(--feedback-curve); }
+.feedback-chart .feedback-point:hover { r: 5; }
 .feedback-chart text { fill: var(--text-soft); font-size: 12px; }
 .feedback-action-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
 .feedback-action-row progress { flex: 1; accent-color: var(--accent); height: 7px; }

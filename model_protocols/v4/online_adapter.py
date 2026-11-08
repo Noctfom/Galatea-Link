@@ -89,6 +89,8 @@ def input_group(name):
             ("hint_", "public_context"), ("known_deck_", "public_context")):
         if name.startswith(prefix):
             return group
+    if name.startswith("current_context_"):
+        return "current_context"
     return "cards" if name == "padding_mask" else "public_context" if name == "public_state_flags" else "unclassified"
 
 
@@ -229,12 +231,20 @@ def project_online_snapshot(source, player, *, event_type=None, history_projecti
         "tracked_lifecycle_consistent": bool(getattr(source, "public_state_flags", (False,))[0]),
         "hint_count": len(getattr(source, "public_hints", ())) }
     report["groups"]["chain"] = {"mapped": True, "source_complete": False}
+    report["groups"]["current_context"] = {"mapped": True, "source_complete": False,
+        "prompt_fact_count": len(getattr(source, "prompt_context", ())),
+        "chain_count": len(source.chain_stack),
+        "recent_indicated_count": len(getattr(source, "recent_chain_targets", ())),
+        "resolving_chain_index": getattr(source, "resolving_chain_index", 0)}
     report["groups"]["effect_history"] = {"mapped": True, "source_complete": False}
     target = GameSnapshot(global_data, entities, actions, chain_stack=deepcopy(source.chain_stack),
         history_stack=deepcopy(source.history_stack), transition_history=history,
         public_hints=deepcopy(getattr(source, "public_hints", ())),
         known_deck_cards=deepcopy(getattr(source, "known_deck_cards", ())),
         public_state_flags=tuple(getattr(source, "public_state_flags", (False,) * 6)))
+    target.prompt_context = deepcopy(getattr(source, "prompt_context", ()))
+    target.recent_chain_targets = deepcopy(getattr(source, "recent_chain_targets", ()))
+    target.resolving_chain_index = getattr(source, "resolving_chain_index", 0)
     for section in ("deck", "extra", "initial_deck", "initial_extra"):
         name = f"p{player}_{section}_codes"
         setattr(target, name, list(getattr(source, name, ())))

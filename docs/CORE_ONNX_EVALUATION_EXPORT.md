@@ -2,6 +2,8 @@
 
 本说明对应 Link 3.4.0，参考只读 Core 提交 `2bd44a170e68c64630c7edcbae7f14eb5da7c4a0`。没有修改 Core 源码。本次没有发现新的 Core 解析缺陷，以下属于可选的部署输出增强
 
+2026-11-07 补充核对 Core 3.16.9：当前观测已升级到修订 15、116 项输入，但普通 ONNX 导出仍为双输出。Link 3.4.1 支持该输入升级，旧修订 14 的冻结图继续兼容；下述可选终局输出是另一项独立增强
+
 ## 当前已有能力
 
 Core 的 V4 `GalateaNet.forward(..., return_evaluation=True)` 已能在同一次前向中取得状态级终局预测，`evaluate_state()` 已能跳过动作塔。目标来自 `goal_planner.target_decoder.evaluate_terminal(plan_latent)`，不是依赖所选动作的训练辅助头
@@ -21,7 +23,7 @@ Core 的 V4 `GalateaNet.forward(..., return_evaluation=True)` 已能在同一次
 
 剩余长度由消费端按 `expm1(max(0, value) * log1p(1500))` 还原。若未来改变归一化常量、类别顺序或长度单位，应显式增加预测输出合同标记；不要只保持输出名而改变含义
 
-网络权重、108 项 V4 输入、模型协议和结构修订保持原合同。制品清单可记录可选输出集合或 `galatea.state_terminal.v1` 标识，导出校验同步支持双／四输出，不应只改包装器就让后续验收仍要求恰好两个输出
+增加终局输出本身不改变网络权重、模型协议或既有输入合同；当前修订 15 使用 116 项输入，历史修订 14 图保留 108 项。制品清单可记录可选输出集合或 `galatea.state_terminal.v1` 标识，导出校验同步支持双／四输出，不应只改包装器就让后续验收仍要求恰好两个输出
 
 ## 建议验收
 

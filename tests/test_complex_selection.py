@@ -169,7 +169,7 @@ def test_complex_base_inputs_match_readonly_core(tmp_path, name, player):
     assert projection.report["groups"]["actions"]["candidate_stage"] == ("direct_candidates" if kind == 26 else "base_candidates")
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projection, reference, player)
     assert report["all_fields_equal"], report["different_fields"]
-    assert report["field_count"] == 108
+    assert report["field_count"] == 116
 
 
 # 只在内存编译 Core 选择校验器，既不导入仓库模块也不写入 Core

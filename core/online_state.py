@@ -34,10 +34,13 @@ QUERY_FIELD_NAMES = {
 
 class OnlineStateProjection:
     # 初始化单局玩家视角且默认不声明已经确认服务器缓存合同
-    def __init__(self, *, query_mode=None):
+    def __init__(self, *, query_mode=None, spectator=False):
         if query_mode not in {None, "replace", "merge"}:
             raise ValueError("在线查询缓存模式无效")
         self.query_mode = query_mode
+        self.spectator = bool(spectator)
+        self.spectator_confirmed = False
+        self.start_source = None
         self.perspective = None
         self.counts = {}
         self.cards = {}
@@ -50,7 +53,7 @@ class OnlineStateProjection:
         self.starting_player = None
         self.turn_counts = [0, 0]
         self.disabled_field_mask = 0
-        self.public_message_counts = {120: 0, 160: 0, 165: 0}
+        self.public_message_counts = {kind: 0 for kind in (2, 70, 71, 72, 73, 74, 75, 76, 83, 120, 160, 165)}
         self.last_known_draws = ()
         self.invalidated_locations = ()
         self.compatibility_warning_counts = {}
@@ -76,17 +79,23 @@ class OnlineStateProjection:
         if len(payload) != 18:
             raise ValueError(f"在线 Start 载荷必须为 18 字节，实际 {len(payload)}")
         player, rule, lp0, lp1, main0, extra0, main1, extra1 = struct.unpack("<BBIIHHHH", payload)
-        if player not in (0, 1):
+        if self.spectator:
+            if player not in (0x10, 0x11):
+                self.warn_compatibility("spectator_start_not_confirmed", player_type=player)
+                return None
+            self.spectator_confirmed = True
+        elif player not in (0, 1):
             raise ValueError("在线 Start 玩家视角无效")
         if any(count > 256 for count in (main0, extra0, main1, extra1)):
             self.warn_compatibility("start_large_deck_counts", counts=(main0, extra0, main1, extra1))
-        self.perspective = player
+        self.perspective = None if self.spectator else player
+        self.start_source = "msg_start"
         self.cards.clear()
         self.counts = {(0, 1): main0, (0, 64): extra0, (1, 1): main1, (1, 64): extra1}
         self.public_context = OnlinePublicContext((main0, main1))
         self.started = True
         self.sequence += 1
-        return {"perspective": player, "rule": rule, "lp": (lp0, lp1)}
+        return {"perspective": self.perspective, "rule": rule, "lp": (lp0, lp1)}
 
     # 按行头确定记录边界，兼容未知附加字段且只解析已知字段
     def _rows(self, data, *, source=None):
@@ -191,7 +200,10 @@ class OnlineStateProjection:
 
     # 报告已知边界而不把诊断投影宣称为完整 V4 输入
     def coverage(self):
-        return {"visibility": "player_view", "query_mode": self.query_mode or "unconfirmed",
+        return {"visibility": "spectator_public" if self.spectator else "player_view", "query_mode": self.query_mode or "unconfirmed",
+                "spectator_confirmed": self.spectator_confirmed, "start_source": self.start_source,
+                "turn_count_origin": "observed_since_join" if self.spectator and self.start_source == "reload_field" else "from_start",
+                "turn_count_origin": "observed_since_join" if self.spectator and self.start_source == "reload_field" else "from_start",
                 "confirmation_header_size": self.confirmation_header_size,
                 "chain_entry_size": self.chain_entry_size,
                 "field_rebuilds": self.field_rebuilds,
@@ -211,8 +223,12 @@ class OnlineStateProjection:
     # 以已完整解析的快照重建缓存与数量，不恢复报文未提供的卡片身份和实例提示
     def restore_field(self, restored, cards):
         if not self.started:
-            self.warn_compatibility("reload_before_start")
-            return False
+            if self.spectator and self.spectator_confirmed:
+                self.started = True
+                self.start_source = "reload_field"
+            else:
+                self.warn_compatibility("reload_before_start")
+                return False
         counts = {}
         for player, data in enumerate(restored["players"]):
             counts.update({(player, zone): count for zone, count in zip((1, 2, 16, 32, 64), data["counts"][:5])})
@@ -239,7 +255,7 @@ class OnlineStateProjection:
     # 按真实接收者绑定提示与记牌可见性，不将单方消息升级为双方事实
     def public_snapshot(self):
         hints, cards, flags = self.public_context.snapshot()
-        scope = 1 << self.perspective if self.perspective in (0, 1) else 0
+        scope = 3 if self.spectator else 1 << self.perspective if self.perspective in (0, 1) else 0
         return (tuple(replace(hint, visibility=hint.visibility & scope) for hint in hints),
             tuple(replace(card, visibility=card.visibility & scope) for card in cards), flags)
 
@@ -288,7 +304,7 @@ class OnlineStateProjection:
             raw, code = struct.unpack("<II", payload)
             self.public_notifications.append({"type": kind, "location_raw": raw,
                 "code": code & 0x7FFFFFFF, "turn": self.turn, "sequence": self.sequence + 1,
-                "visibility": 1 << self.perspective})
+                "visibility": 3 if self.spectator else 1 << self.perspective})
         elif kind == 40:
             player, = struct.unpack("<B", payload)
             if player not in (0, 1):
@@ -314,7 +330,7 @@ class OnlineStateProjection:
                 if code:
                     # 展示可发生在衍生物尚未进场时，只登记已见身份而不制造场面实体
                     self.public_notifications.append({"type": kind, "code": code, "turn": self.turn,
-                        "sequence": self.sequence + 1, "visibility": 1 << self.perspective})
+                        "sequence": self.sequence + 1, "visibility": 3 if self.spectator else 1 << self.perspective})
         elif kind in (32, 33, 39):
             player = payload[0]
             if player not in (0, 1):

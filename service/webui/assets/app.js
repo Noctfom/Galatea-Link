@@ -414,6 +414,9 @@ function renderModelMetadata(coreModel, configuredModel) {
     if (metadata.asset_compatibility?.warning) {
       rows.push(["ONNX 资产警告", metadata.asset_compatibility.message]);
     }
+    if (metadata.observation_compatibility) {
+      rows.push(["观测输入", metadata.observation_compatibility.message]);
+    }
     const preferredKeys = ["backend", "protocol_version", "model_protocol_version", "checkpoint", "model_name", "adapter", "format"];
     const used = new Set();
     for (const key of preferredKeys) {
@@ -1016,6 +1019,7 @@ function renderConfiguration(configuration) {
   const llm = configuration?.llm || {};
   const service = configuration?.service || {};
   query("#serverProfileInput").value = server.profile || "ygopro";
+  query("#serverRoleInput").value = server.role || "duelist";
   query("#serverHostInput").value = server.host || "";
   query("#serverPortInput").value = server.port ?? 7911;
   query("#serverProtocolInput").value = formatProtocolVersion(server.protocol_version ?? 0x1361);
@@ -1040,6 +1044,7 @@ function renderConfiguration(configuration) {
     });
   }
   query("#preferSecondInput").checked = Boolean(agent.prefer_second);
+  updateSessionRoleFields();
 
   query("#llmEnabledInput").checked = Boolean(llm.enabled);
   query("#llmProviderInput").value = llm.provider || "openai_compatible";
@@ -1099,10 +1104,23 @@ async function refreshConfiguration() {
   return configuration;
 }
 
+// 观众身份不需要卡组和先后攻偏好，角色切换仍按配置在下次会话生效
+function updateSessionRoleFields() {
+  const spectator = query("#serverRoleInput").value === "spectator";
+  if (appState.capabilities) query("#serverRoleInput").options[1].disabled = !appState.capabilities.online_observation?.spectator_seat;
+  query("#agentDeckInput").disabled = spectator;
+  query("#agentDeckInput").required = !spectator;
+  query("#agentDeckInput").title = spectator ? "观众席不加载或上传卡组" : "选择决斗者使用的卡组";
+  query("#preferSecondInput").disabled = spectator;
+}
+
 // 从 YGOPro 表单读取服务器配置草稿
 function readServerConfigurationPatch() {
+  const role = query("#serverRoleInput").value;
+  if (role === "spectator" && !appState.capabilities?.online_observation?.spectator_seat) throw new Error("当前运行的 Link 不支持观众席，请重启更新后的服务进程");
   return {
     profile: query("#serverProfileInput").value,
+    ...(appState.capabilities?.online_observation?.spectator_seat ? { role } : {}),
     host: query("#serverHostInput").value.trim(),
     port: Number(query("#serverPortInput").value),
     protocol_version: query("#serverProtocolInput").value.trim(),
@@ -1314,6 +1332,7 @@ function renderControls(controls) {
   const intervention = controls?.baseline_intervention || controls?.intervention || {};
   query("#feedbackEnabledInput").checked = intervention.core_feedback_enabled ?? true;
   query("#feedbackPassiveInput").checked = intervention.core_feedback_passive_enabled ?? false;
+  query("#feedbackSpectatorPlayerInput").value = String(intervention.core_feedback_spectator_player ?? 0);
   const autonomy = controls?.autonomy || {};
   const chat = controls?.game_chat || {};
   query("#modeInput").value = intervention.mode || "core_only";
@@ -1358,6 +1377,11 @@ function feedbackPercent(value) {
   return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "—";
 }
 
+// 中途观战无法恢复绝对回合数时，明确显示加入后的观测计数
+function feedbackTurnLabel(point) {
+  return point.turn_count_origin === "observed_since_join" ? `加入后回合计数 ${point.turn}` : `第 ${point.turn} 回合`;
+}
+
 // 安全创建采样图节点，不将模型或服务器文本作为 HTML 执行
 function feedbackSvgNode(name, attributes, text) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", name);
@@ -1366,44 +1390,70 @@ function feedbackSvgNode(name, attributes, text) {
   return node;
 }
 
-// 绘制有界采样折线，缺失输出中断连线且不延长到未来状态
+// 固定采样序号窗口及概率刻度，避免每个新点重新拉伸整条走势
 function renderFeedbackChart(history) {
   const host = query("#feedbackChart");
-  host.replaceChildren();
   const choice = query("#feedbackMetricInput").value;
   const probability = choice === "probability" || (choice === "auto" && history.some(point => Number.isFinite(point.probabilities?.win)));
-  const values = history.map(point => probability ? point.probabilities?.win : point.discounted_value);
+  const windowSize = Number(query("#feedbackWindowInput").value) || 64;
+  const numbered = history.map((point, index) => ({ ...point, sample_id: Number.isFinite(point.sample_id) ? point.sample_id : index + 1 }));
+  const lastId = numbered.at(-1)?.sample_id || 0;
+  const start = Math.max(0, lastId - windowSize);
+  const points = numbered.filter(point => point.sample_id > start);
+  const values = points.map(point => probability ? point.probabilities?.win : point.discounted_value);
   const valid = values.filter(Number.isFinite);
+  const series = appState.feedback?.series_id || "legacy";
+  if (host.dataset.series !== series) {
+    host.dataset.series = series;
+    host.feedbackValueRadius = 1;
+  }
+  const requiredRadius = Math.max(1, ...valid.map(value => Math.abs(value)));
+  host.feedbackValueRadius = Math.max(host.feedbackValueRadius || 1, 2 ** Math.ceil(Math.log2(requiredRadius)));
+  const signature = JSON.stringify([series, probability, windowSize, start, host.feedbackValueRadius,
+    points.map((point, index) => [point.sample_id, values[index], point.turn, point.turn_count_origin, point.phase_id, point.sampled_at])]);
+  if (signature === host.feedbackSignature) return;
+  host.feedbackSignature = signature;
+  host.replaceChildren();
   host.classList.toggle("empty-state", !valid.length);
   if (!valid.length) {
     host.textContent = history.length ? "本次模型没有提供该指标，请切换为折扣价值" : "本局暂无模型采样";
     return;
   }
-  const svg = feedbackSvgNode("svg", { viewBox: "0 0 900 250", role: "img", "aria-label": probability ? "真实采样的胜利概率曲线" : "真实采样的折扣价值曲线" });
-  const low = probability ? 0 : Math.min(0, ...valid);
-  const high = probability ? 1 : Math.max(0, ...valid);
-  const span = high - low || 1;
+  const svg = feedbackSvgNode("svg", { viewBox: "0 0 1000 292", role: "img", "aria-label": probability ? "固定采样横轴的胜利概率曲线" : "固定采样横轴的折扣价值曲线" });
+  const low = probability ? 0 : -host.feedbackValueRadius;
+  const high = probability ? 1 : host.feedbackValueRadius;
+  const span = high - low;
+  const left = 72, right = 974, top = 20, bottom = 234;
+  svg.append(feedbackSvgNode("title", {}, "横轴为实际采样序号，非等距游戏时间；空缺指标不连线，未采样区域保持空白"));
   for (let row = 0; row < 5; row += 1) {
-    const y = 20 + row * 47;
+    const y = top + row * (bottom - top) / 4;
     const tick = high - span * row / 4;
-    svg.append(feedbackSvgNode("line", { x1: 65, x2: 880, y1: y, y2: y, class: "feedback-axis" }));
-    svg.append(feedbackSvgNode("text", { x: 55, y: y + 4, "text-anchor": "end" }, probability ? feedbackPercent(tick) : tick.toFixed(2)));
+    svg.append(feedbackSvgNode("line", { x1: left, x2: right, y1: y, y2: y, class: "feedback-grid", stroke: "var(--line, #dde2dc)" }));
+    svg.append(feedbackSvgNode("text", { x: left - 12, y: y + 4, "text-anchor": "end" }, probability ? `${Math.round(tick * 100)}%` : tick.toFixed(2)));
   }
+  for (let column = 0; column <= 4; column += 1) {
+    const x = left + (right - left) * column / 4;
+    svg.append(feedbackSvgNode("line", { x1: x, x2: x, y1: top, y2: bottom, class: "feedback-grid feedback-grid-vertical", stroke: "var(--line, #dde2dc)" }));
+    svg.append(feedbackSvgNode("text", { x, y: bottom + 23, "text-anchor": "middle", class: "feedback-x-tick" }, start + windowSize * column / 4));
+  }
+  svg.append(feedbackSvgNode("line", { x1: left, x2: right, y1: bottom, y2: bottom, class: "feedback-axis", stroke: "var(--line-strong, #cbd2cb)" }));
+  const pathNode = feedbackSvgNode("path", { class: "feedback-line", fill: "none", stroke: "var(--feedback-curve, #338c98)", "stroke-width": 2, "vector-effect": "non-scaling-stroke" });
+  svg.append(pathNode);
   let path = "";
   let previousValid = false;
   values.forEach((value, index) => {
     if (!Number.isFinite(value)) { previousValid = false; return; }
-    const x = 65 + index / Math.max(1, values.length - 1) * 815;
-    const y = 20 + (high - value) / span * 188;
+    const point = points[index];
+    const x = left + (point.sample_id - start) / windowSize * (right - left);
+    const y = top + (high - value) / span * (bottom - top);
     path += `${previousValid ? " L" : " M"}${x},${y}`;
     previousValid = true;
-    const dot = feedbackSvgNode("circle", { cx: x, cy: y, r: 3.5, class: "feedback-point" });
-    dot.append(feedbackSvgNode("title", {}, `采样 ${index + 1} · 第 ${history[index].turn} 回合 · ${probability ? feedbackPercent(value) : value.toFixed(4)}`));
+    const dot = feedbackSvgNode("circle", { cx: x, cy: y, r: index === values.length - 1 ? 4 : 2.5, class: "feedback-point", fill: "var(--feedback-curve, #338c98)" });
+    dot.append(feedbackSvgNode("title", {}, `采样 ${point.sample_id} · ${feedbackTurnLabel(point)} · ${formatTime(point.sampled_at)} · ${probability ? feedbackPercent(value) : value.toFixed(4)}`));
     svg.append(dot);
   });
-  svg.prepend(feedbackSvgNode("path", { d: path, class: "feedback-line" }));
-  svg.append(feedbackSvgNode("text", { x: 65, y: 237 }, `采样 1`));
-  svg.append(feedbackSvgNode("text", { x: 880, y: 237, "text-anchor": "end" }, `采样 ${history.length}`));
+  pathNode.setAttribute("d", path);
+  svg.append(feedbackSvgNode("text", { x: (left + right) / 2, y: 285, "text-anchor": "middle" }, "采样序号"));
   host.append(svg);
 }
 
@@ -1411,18 +1461,22 @@ function renderFeedbackChart(history) {
 function renderFeedback(report) {
   appState.feedback = report;
   const latest = report?.latest;
+  const spectator = report?.role === "spectator" || latest?.visibility === "spectator_public";
+  query("#feedbackSpectatorPlayerInput").disabled = !appState.capabilities?.model_feedback?.spectator_reference_control;
+  setText("#feedbackScopeNote", spectator ? `观众席 · 仅公开场面 · 参照 Core Player ${report.reference_player ?? latest?.perspective ?? 0}` : "当前决斗席 · 玩家可见信息");
   setPill("#feedbackStatusBadge", !report?.enabled ? "反馈已关闭" : !latest ? "等待采样" : report.scope === "last_duel" ? "上局记录" : report.current ? "当前状态采样" : "最近采样 · 场面已更新", report.current ? "success" : "neutral");
+  if (spectator && !latest && report?.enabled) setPill("#feedbackStatusBadge", !report.spectator_confirmed ? "等待服务器确认观众席" : !report.model_available || report.model_protocol_version !== 4 ? "公开观察已连接，评测需要 V4 模型" : !report.passive_enabled ? "观众席 · 旁路评测未开启" : "观众席 · 等待公开场面评测", "neutral");
   setText("#feedbackWinValue", feedbackPercent(latest?.probabilities?.win));
   setText("#feedbackOutcomeNote", latest?.probabilities ? `平局 ${feedbackPercent(latest.probabilities.draw)} · 失败 ${feedbackPercent(latest.probabilities.loss)}` : latest ? "未提供终局概率，不能由价值分数换算" : "等待模型终局输出");
   setText("#feedbackCriticValue", Number.isFinite(latest?.discounted_value) ? latest.discounted_value.toFixed(4) : "—");
   setText("#feedbackRemainingValue", Number.isFinite(latest?.remaining_events) ? `${latest.remaining_events_clipped ? "≥ " : ""}${latest.remaining_events.toFixed(1)}` : "—");
   setText("#feedbackPolicyValue", feedbackPercent(latest?.policy?.confidence));
-  setText("#feedbackSampleNote", latest ? `${report.history.length} / ${report.capacity} 点 · ${formatTime(latest.sampled_at)} · 第 ${latest.turn} 回合 · 只含实际采样，非完整每帧预测` : "启动 V4 对局后会复用决策推理；也可开启持续旁路评测");
+  setText("#feedbackSampleNote", latest ? `${report.history.length} / ${report.capacity} 点 · ${formatTime(latest.sampled_at)} · ${feedbackTurnLabel(latest)} · 只含实际采样，非完整每帧预测` : "启动 V4 对局后会复用决策推理；也可开启持续旁路评测");
   const details = query("#feedbackDetails");
   details.replaceChildren();
   for (const [label, value] of [
-    ["实际视角", latest ? `Core Player ${latest.perspective} · 本方可见` : "尚未绑定"],
-    ["采样来源", latest?.source === "decision_shared" ? "决策共用推理" : latest?.source === "passive" ? "独立旁路评测" : "—"],
+    ["实际视角", latest ? `Core Player ${latest.perspective} · ${spectator ? "公开场面参照" : "本方可见"}` : "尚未绑定"],
+    ["采样来源", latest?.source === "decision_shared" ? "决策共用推理" : latest?.source === "passive" ? "独立旁路评测" : latest?.source === "spectator" ? "观众席旁路评测" : "—"],
     ["推理后端", latest?.model?.inference_backend],
     ["模型轮次", latest?.model?.iteration], ["状态序号", latest?.state_sequence],
     ["采样时间", latest ? formatTime(latest.sampled_at) : "—"],
@@ -1432,7 +1486,7 @@ function renderFeedback(report) {
     const definition = document.createElement("dd"); definition.textContent = displayValue(value);
     row.append(term, definition); details.append(row);
   }
-  setText("#feedbackLimitNote", report?.last_error || "预测未经在线校准；使用本方可见信息与掩蔽历史。ONNX 未导出终局头时只显示价值，双方预测不能视作互补概率");
+  setText("#feedbackLimitNote", report?.last_error || (spectator ? "只使用观众收到的公开场面，双方手牌和初始构筑未知；不是该玩家完整视角的预测，数值未经校准。需要开启持续旁路评测并加载 V4 模型" : "预测未经在线校准；使用本方可见信息与掩蔽历史。ONNX 未导出终局头时只显示价值，双方预测不能视作互补概率"));
   const actions = query("#feedbackActions");
   actions.replaceChildren();
   for (const item of latest?.policy?.top_actions || []) {
@@ -1468,6 +1522,7 @@ async function saveFeedbackControls() {
   await submitControlsPatch({ intervention: {
     core_feedback_enabled: query("#feedbackEnabledInput").checked,
     core_feedback_passive_enabled: query("#feedbackPassiveInput").checked,
+    ...(appState.capabilities.model_feedback.spectator_reference_control ? { core_feedback_spectator_player: Number(query("#feedbackSpectatorPlayerInput").value) } : {}),
   } }, "模型反馈设置已保存");
   await refreshFeedback();
 }
@@ -1879,7 +1934,14 @@ function renderSelectedModel(catalog) {
   if (record.online_inference_mode === "player_view_compatible_v1") {
     metadata.append(createModelTag("V4 兼容在线 · 转移历史已屏蔽"));
   }
-  card.append(header, metadata);
+  if (record.observation_compatibility) {
+    metadata.append(createModelTag(`观测修订 ${record.protocol_schema_revision} · 运行 ${record.runtime_protocol_schema_revision}`));
+    const observationNote = document.createElement("p");
+    observationNote.className = "panel-description";
+    observationNote.textContent = record.observation_compatibility.message;
+    card.append(observationNote);
+  }
+  card.prepend(header, metadata);
   container.appendChild(card);
 }
 
@@ -1921,6 +1983,13 @@ function createModelRecord(record, selectedFilename) {
   button.addEventListener("click", handleModelSelect);
   footer.append(assetState, button);
   card.append(header, metadata, footer);
+  if (record.observation_compatibility) {
+    metadata.append(createModelTag(`观测修订 ${record.protocol_schema_revision} · 运行 ${record.runtime_protocol_schema_revision}`));
+    const observationNote = document.createElement("p");
+    observationNote.className = "panel-description";
+    observationNote.textContent = record.observation_compatibility.message;
+    card.insertBefore(observationNote, footer);
+  }
   return card;
 }
 
@@ -2742,6 +2811,7 @@ function bindInterfaceEvents() {
   });
   query("#refreshFeedbackButton").addEventListener("click", () => runAction(refreshFeedback, {}));
   query("#feedbackMetricInput").addEventListener("change", () => renderFeedbackChart(appState.feedback?.history || []));
+  query("#feedbackWindowInput").addEventListener("change", () => renderFeedbackChart(appState.feedback?.history || []));
   const navItems = queryAll("[data-page]");
   for (const item of navItems) {
     item.addEventListener("click", handleNavigationClick);
@@ -2758,6 +2828,7 @@ function bindInterfaceEvents() {
   query("#stopButton").addEventListener("click", runAction.bind(null, stopSession, {}));
   query("#thresholdInput").addEventListener("input", updateThresholdOutput);
   query("#configurationForm").addEventListener("submit", handleConfigurationSubmit);
+  query("#serverRoleInput").addEventListener("change", updateSessionRoleFields);
   query("#testServerButton").addEventListener("click", runAction.bind(null, testServerConfiguration, {}));
   query("#testLlmButton").addEventListener("click", runAction.bind(null, testLlmConfiguration, {}));
   query("#saveLlmApiKeyButton").addEventListener("click", runAction.bind(null, saveLlmApiKey, {}));

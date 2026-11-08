@@ -8,7 +8,12 @@ import hashlib
 import json
 import sys
 import subprocess
+import difflib
 from pathlib import Path
+
+REVIEWED_OBSERVATION_COMMIT = "23d6fd0c1d57f38ab6736e7002acf9637f8d0fbf"
+REVIEWED_OBSERVATION_MODULES = {"core_message_protocol.py", "data_types.py", "public_observation.py",
+    "feature_encoder.py", "public_context_encoder.py", "galatea_net.py"}
 
 
 # 读取完整源码及抽象语法树且不导入或执行 Core 模块
@@ -145,28 +150,51 @@ def build_snapshot(root):
     rendered = relative_imports(rendered, modules)
     rendered = rendered.split("if __name__ == '__main__':")[0]
     rendered = rendered.replace("GalateaEncoder", "CoreV4NumpyEncoder")
+    # 冻结修订十四图不构造其签名以外的可选上下文，也不受新分支容量限制
+    rendered = rendered.replace("def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:",
+        "def encode(self, snapshot: GameSnapshot, player_id: int, *, current_context=True) -> dict:")
+    rendered = rendered.replace("        base_dict.update(self._encode_current_context(snapshot, player_id))",
+        "        if current_context:\n            base_dict.update(self._encode_current_context(snapshot, player_id))")
     outputs["feature_encoder.py"] = annotate(rendered, "V4 字段构造快照的纯 NumPy 数值等价版本")
     return outputs, origins
 
 
-# 输出补丁供工具应用且不向 Core 或 Link 直接写入文件
+# 只输出已审核模块的差异补丁，保留 Link 手写兼容层与独立资产加载器
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("core_root", type=Path)
-    parser.add_argument("--module", action="append")
+    parser.add_argument("--module", action="append", choices=sorted(REVIEWED_OBSERVATION_MODULES | {"source_manifest.json"}))
     args = parser.parse_args()
-    commit = subprocess.run(["git", "-C", str(args.core_root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    if commit != "1b0fa025994b6eabb8c58dc1ed2090bfbea28d04":
+    commit = subprocess.run(["git", "-c", f"safe.directory={args.core_root.resolve().as_posix()}",
+        "-C", str(args.core_root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    if commit != REVIEWED_OBSERVATION_COMMIT:
         raise RuntimeError("Core 来源提交发生变化，请先审查协议差异再更新快照生成器")
     outputs, origins = build_snapshot(args.core_root.resolve())
-    outputs["source_manifest.json"] = json.dumps({"source": "Galatea-Core", "commit": "1b0fa025994b6eabb8c58dc1ed2090bfbea28d04", "model_protocol_version": 4, "schema_revision": 14, "files_sha256": origins}, ensure_ascii=False, indent=2) + "\n"
+    target_root = Path(__file__).resolve().parents[1] / "model_protocols" / "v4"
+    manifest = json.loads((target_root / "source_manifest.json").read_text(encoding="utf-8"))
+    manifest["schema_revision"] = 15
+    sources = manifest.setdefault("maintenance_sources", [])
+    entry = next((item for item in sources if item.get("commit") == commit), None)
+    if entry is None:
+        entry = {"commit": commit, "purpose": "复用已审核的修订十五观测与网络计算，Link 兼容和资产层独立保留"}
+        sources.insert(0, entry)
+    entry.setdefault("source_sha256_utf8", {}).update({name: origins[name] for name in REVIEWED_OBSERVATION_MODULES | {"protocol_schema.py"}})
+    outputs["source_manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     print("*** Begin Patch")
     for name, source in outputs.items():
-        if args.module and name not in args.module:
+        if name not in (args.module or REVIEWED_OBSERVATION_MODULES | {"source_manifest.json"}):
             continue
-        print(f"*** Add File: model_protocols/v4/{name}")
-        print("\n".join("+" + line for line in source.splitlines()))
+        target = target_root / name
+        if not target.is_file():
+            print(f"*** Add File: model_protocols/v4/{name}")
+            print("\n".join("+" + line for line in source.splitlines()))
+            continue
+        previous = target.read_text(encoding="utf-8")
+        changes = list(difflib.unified_diff(previous.splitlines(), source.splitlines(), n=3))[2:]
+        if changes:
+            print(f"*** Update File: model_protocols/v4/{name}")
+            print("\n".join("@@" if line.startswith("@@") else line for line in changes))
     print("*** End Patch")
 
 

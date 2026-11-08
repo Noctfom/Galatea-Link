@@ -18,6 +18,7 @@ CTOS_JOIN_GAME    = 0x12
 CTOS_LEAVE_GAME   = 0x13
 CTOS_SURRENDER    = 0x14
 CTOS_HS_READY     = 0x22
+CTOS_HS_TOOBSERVER = 0x21
 CTOS_HS_START     = 0x25
 
 STOC_GAME_MSG     = 0x01
@@ -38,6 +39,10 @@ PLAYERCHANGE_OBSERVE = 0x08
 PLAYERCHANGE_READY = 0x09
 PLAYERCHANGE_NOTREADY = 0x0A
 PLAYERCHANGE_LEAVE = 0x0B
+
+# 观众连接禁止发出会改变决斗者身份或游戏进程的请求
+SPECTATOR_BLOCKED_REQUESTS = frozenset({CTOS_RESPONSE, CTOS_UPDATE_DECK, CTOS_HAND_RESULT,
+    CTOS_TP_RESULT, CTOS_TIME_CONFIRM, CTOS_SURRENDER, 0x20, CTOS_HS_READY, 0x23, 0x24, CTOS_HS_START})
 
 WIN_REASON_NAMES = {
     0x00: "投降",
@@ -239,6 +244,7 @@ class YgoNetClient:
         connect_timeout=10.0,
         inbound_queue_size=256,
         trace_packets=False,
+        spectator=False,
     ):
         self.host = host
         self.port = port
@@ -250,6 +256,7 @@ class YgoNetClient:
         self.game_id = game_id
         self.connect_timeout = connect_timeout
         self.trace_packets = trace_packets
+        self.spectator = bool(spectator)
         self._write_lock = asyncio.Lock()
         self._incoming = asyncio.Queue(maxsize=inbound_queue_size)
         self._receive_task = None
@@ -274,6 +281,8 @@ class YgoNetClient:
 
     async def send_packet(self, msg_type: int, payload: bytes = b''):
         """🌟 升级为真异步：确保每一发网络弹药都实时轰向网卡"""
+        if self.spectator and msg_type in SPECTATOR_BLOCKED_REQUESTS:
+            raise RuntimeError("观众连接不能发送决斗操作或卡组数据")
         packet = build_packet(msg_type, payload)
 
         async with self._write_lock:
@@ -404,6 +413,10 @@ class YgoNetClient:
 
     async def send_ready(self):
         await self.send_packet(CTOS_HS_READY)
+
+    # 请求服务器将当前大厅座位切换为正式观众席
+    async def send_to_observer(self):
+        return await self.send_packet(CTOS_HS_TOOBSERVER)
 
     # 由房主在全部决斗者准备后请求开始对局
     async def send_start_duel(self):

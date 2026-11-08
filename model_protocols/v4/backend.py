@@ -114,10 +114,11 @@ def public_metadata(inspected, assets, runtime):
             "online_inference_mode": "player_view_compatible_v1",
             "online_history_policy": "masked_unavailable",
             "native_online_observation_complete": False,
-            "spectator_evaluation_supported": False,
+            "spectator_evaluation_supported": True,
             "runtime_asset_identity": dict(assets.identity),
             "online_block_reason": None,
             "online_warning": "V4 使用玩家可见状态兼容推理，无法对齐的转移历史已屏蔽，策略质量待真实对局验证"}
+    metadata.update(observation_compatibility_metadata(inspected, frozen_onnx=runtime.runtime_id == "onnxruntime"))
     if runtime.runtime_id == "onnxruntime":
         metadata["asset_compatibility"] = assets.onnx_compatibility(inspected)
     elif inspected["semantic_lookup_hash"] != assets.lookup.prefix_hash(inspected["semantic_lookup_card_count"]):
@@ -126,6 +127,24 @@ def public_metadata(inspected, assets, runtime):
             "runtime_semantic_lookup_hash": assets.identity["semantic_lookup_hash"],
             "message": "已校验语义编号和向量坐标系，使用新语义内容，模型预测可能变化"}
     return metadata
+
+
+# 公开制品与实际输入合同的差别，旧图保留原签名且不伪装成新观测
+def observation_compatibility_metadata(inspected, *, frozen_onnx):
+    from .protocol_schema import PROTOCOL_SCHEMA_REVISION
+    source = inspected["protocol_schema_revision"]
+    runtime = source if frozen_onnx else PROTOCOL_SCHEMA_REVISION
+    legacy_graph = frozen_onnx and source < PROTOCOL_SCHEMA_REVISION
+    migrated = runtime != source
+    message = ("旧 ONNX 继续使用修订 14 的 108 项输入，缺少当前询问与逐链观测；需要对应 PTH 重导出才能补入" if legacy_graph else
+        "旧 PTH 权重完整保留，运行时升级为修订 15 的 116 项输入，新增观测可能改变预测，原文件未改写" if migrated else
+        "使用修订 15 的当前询问与逐链观测")
+    return {"runtime_protocol_schema_revision": runtime,
+        "observation_compatibility": {"source_revision": source, "runtime_revision": runtime,
+            "input_count": 116 if runtime >= 15 else 108,
+            "current_context_supported": runtime >= 15, "warning": legacy_graph or migrated,
+            "status": "frozen_legacy_observation" if legacy_graph else "weights_preserved_extension" if migrated else "matched",
+            "message": message}}
 
 
 # 加载独立 V4 模型及运行时且不导入外部 Core 模块
@@ -157,5 +176,6 @@ def load_v4_backend(path, inspected, *, device="cpu", asset_path=None, providers
         net.load_state_dict(checkpoint["model_state_dict"], strict=True)
         net.eval()
         runtime = PyTorchInferenceRuntime(net, device)
-    encoder = GalateaEncoder(assets, frozen_card_count=inspected["card_vocab_card_count"] if frozen_onnx else None)
+    encoder = GalateaEncoder(assets, frozen_card_count=inspected["card_vocab_card_count"] if frozen_onnx else None,
+        schema_revision=inspected["protocol_schema_revision"] if frozen_onnx else assets.identity["protocol_schema_revision"])
     return ModelBackend(net, encoder, public_metadata(inspected, assets, runtime), MAX_ACTIONS, ADAPTER_ID, runtime, runtime.runtime_id)

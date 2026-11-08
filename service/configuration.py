@@ -58,6 +58,8 @@ def validate_editable_configuration(
 ) -> None:
     if server.profile.strip().casefold() not in {"ygopro", "mdpro3"}:
         raise ValueError("当前只启用 YGOPro 兼容服务器配置")
+    if server.role not in {"duelist", "spectator"}:
+        raise ValueError("入房身份必须为 duelist 或 spectator")
     if not server.host.strip() or len(server.host) > 255 or "\x00" in server.host:
         raise ValueError("YGOPro 服务器地址无效")
     if not 1 <= server.port <= 65535:
@@ -76,7 +78,7 @@ def validate_editable_configuration(
         raise ValueError("Agent 名称必须为 1 到 20 个 UTF-16 编码单元")
     deck = agent.deck.strip()
     if (
-        not deck
+        (not deck and server.role != "spectator")
         or len(deck) > 128
         or "\x00" in deck
         or "/" in deck
@@ -133,6 +135,7 @@ def apply_configuration_patch(
 
     server_allowed = {
         "profile",
+        "role",
         "host",
         "port",
         "protocol_version",
@@ -167,7 +170,7 @@ def apply_configuration_patch(
         raise ValueError("LLM 配置补丁包含未知字段")
 
     server_values = {}
-    for field_name in {"profile", "host"}:
+    for field_name in {"profile", "host", "role"}:
         if field_name in server_patch:
             server_values[field_name] = str(server_patch[field_name]).strip()
     for field_name in {"port", "protocol_version", "max_version_retries", "game_id"}:
@@ -263,6 +266,7 @@ def build_configuration_snapshot(
         "revision": int(revision),
         "server": {
             "profile": server.profile,
+            "role": server.role,
             "host": server.host,
             "port": server.port,
             "protocol_version": server.protocol_version,

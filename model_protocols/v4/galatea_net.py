@@ -872,6 +872,17 @@ class GalateaNet(nn.Module):
         decks = F.embedding(batch['known_deck_idx'].long(), self.card_embed.weight[:, :width])
         return self.public_context_encoder(batch, cards, codes, decks)
 
+    # 当前事实沿用公开通知的全部已学参数，旧观测缺省为空上下文
+    def encode_current_context(self, batch):
+        """当前事实沿用公开通知的全部已学参数，旧观测缺省为空上下文"""
+        if 'current_context_mask' not in batch:
+            return None
+        cards = F.embedding(
+            batch['current_context_code'].long(),
+            self.card_embed.weight[:, :self.public_context_encoder.width],
+        )
+        return self.public_context_encoder.encode_current_context(batch, cards)
+
     # 融合全局与卡组分支，并用零门控和双曲正切限制调制幅度
     def build_layered_film(
         self,
@@ -980,6 +991,9 @@ class GalateaNet(nn.Module):
             host_context, public_state_context = self.encode_public_context(batch_dict)
             x_base = x_base + host_context
             public_context = public_state_context.unsqueeze(1)
+        current_context = self.encode_current_context(batch_dict)
+        if current_context is not None:
+            public_context = public_context + current_context[:, :1]
         relation_idx = batch_dict['card_relation_idx'].long()
         relation_type = batch_dict['card_relation_type'].long()
         batch_size, card_count, relation_count = relation_idx.shape
@@ -1099,6 +1113,14 @@ class GalateaNet(nn.Module):
                     batch_dict['c_context'].to(torch.float32)
                 )
             )
+            if current_context is not None:
+                # 按原始链号绑定状态与指示对象，不把不同链的目标混成同一全局集合
+                chain_ids = (batch_dict['c_context'][..., 4].float() * 12.0).round().long().clamp(0, 12)
+                chain_context = torch.gather(
+                    current_context, 1,
+                    chain_ids.unsqueeze(-1).expand(-1, -1, self.d_model),
+                )
+                c_sem = c_sem + chain_context * chain_ids.gt(0).unsqueeze(-1)
             
             chain_pooled = self.chain_context_pool(
                 c_sem,

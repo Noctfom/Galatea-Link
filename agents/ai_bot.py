@@ -102,6 +102,8 @@ class AiBot:
                 _console_print("♻️ [语义兼容更新] " + backend.metadata["semantic_update"]["message"])
             if backend.metadata.get("asset_compatibility", {}).get("warning"):
                 _console_print("⚠️ [ONNX 资产警告] " + backend.metadata["asset_compatibility"]["message"])
+            if backend.metadata.get("observation_compatibility", {}).get("warning"):
+                _console_print("ℹ️ [观测兼容] " + backend.metadata["observation_compatibility"]["message"])
             self.adapter_id = backend.adapter_id
             self.model_protocol_version = backend.metadata["model_protocol_version"]
             self.max_actions = backend.max_actions

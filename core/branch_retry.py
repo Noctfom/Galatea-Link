@@ -55,6 +55,13 @@ class CoreBranchRetry:
             snapshot.chain_stack, snapshot.history_stack, getattr(snapshot, "public_hints", ()),
             getattr(snapshot, "known_deck_cards", ()), getattr(snapshot, "public_state_flags", ())))
 
+    # 用途与公开指示区分提示节点，进出子菜单时不清空整条回退路径
+    def prompt_key(self, snapshot, msg_type, payload):
+        context = tuple(freeze_world(item) for item in (
+            getattr(snapshot, "prompt_context", ()), getattr(snapshot, "recent_chain_targets", ()),
+            getattr(snapshot, "resolving_chain_index", 0)))
+        return msg_type, snapshot.global_data.to_play, bytes(payload), context
+
     # 进入真实提示并检测已接受路径的闭合回退，服务器 Retry 不增加循环次数
     def enter(self, snapshot, msg_type, payload, *, hard_bans=(), engine_retry=False):
         world = self.world_key(snapshot)
@@ -63,7 +70,7 @@ class CoreBranchRetry:
             self._world = world
         player = snapshot.global_data.to_play
         path = self._paths.setdefault(player, [])
-        base = (msg_type, player, bytes(payload))
+        base = self.prompt_key(snapshot, msg_type, payload)
         tokens = tuple(action_token(action) for action in snapshot.valid_actions)
         changes = []
         if engine_retry:

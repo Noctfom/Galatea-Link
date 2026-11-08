@@ -345,7 +345,7 @@ class LinkSessionManager:
         decision_patch = payload.get("decision", {})
         if not all(isinstance(item, Mapping) for item in (server_patch, agent_patch, decision_patch)):
             raise ValueError("会话配置分区必须是 JSON 对象")
-        allowed_server = {"host", "port", "password", "protocol_version", "auto_negotiate_version", "max_version_retries", "game_id", "connect_timeout", "trace_packets"}
+        allowed_server = {"host", "port", "password", "protocol_version", "auto_negotiate_version", "max_version_retries", "game_id", "connect_timeout", "trace_packets", "role"}
         allowed_agent = {"name", "deck", "prefer_second"}
         allowed_decision = {"mode", "agent_backend", "core_policy_mode", "core_temperature", "core_confidence_threshold", "force_llm_message_types", "include_core_suggestion", "core_time_budget", "llm_time_budget"}
         if set(server_patch) - allowed_server or set(agent_patch) - allowed_agent or set(decision_patch) - allowed_decision:
@@ -353,6 +353,8 @@ class LinkSessionManager:
         server_values = {}
         if "host" in server_patch:
             server_values["host"] = str(server_patch["host"]).strip()
+        if "role" in server_patch:
+            server_values["role"] = str(server_patch["role"]).strip().casefold()
         for field_name in ("port", "protocol_version", "max_version_retries", "game_id"):
             if field_name in server_patch:
                 server_values[field_name] = require_int(server_patch[field_name], f"server.{field_name}")
@@ -377,8 +379,9 @@ class LinkSessionManager:
         )
         if deck_scope_id is not None:
             deck_scope_id = str(deck_scope_id).strip()
-        self._ensure_deck_available(agent.deck, deck_scope_id)
         server = replace(base.server, **server_values)
+        if server.role != "spectator":
+            self._ensure_deck_available(agent.deck, deck_scope_id)
         validate_editable_configuration(server, agent, base.llm)
         decision = apply_decision_control_patch(base.decision, {"intervention": dict(decision_patch)}) if decision_patch else base.decision
         self._session_config = replace(base, server=server, agent=agent, decision=decision)
@@ -397,7 +400,8 @@ class LinkSessionManager:
                 patch,
                 expected_revision=expected_revision,
             )
-            self._ensure_deck_available(agent.deck)
+            if server.role != "spectator":
+                self._ensure_deck_available(agent.deck)
             configuration = self._settings.commit_configuration(
                 server,
                 agent,

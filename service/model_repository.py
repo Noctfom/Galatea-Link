@@ -460,10 +460,12 @@ class LinkModelRepository:
         }
         if protocol == 4:
             from model_protocols.v4.assets import PROTOCOL_IDENTITY_KEYS
+            from model_protocols.v4.backend import observation_compatibility_metadata
             result.update({key: inspected.get(key) for key in PROTOCOL_IDENTITY_KEYS})
+            result.update(observation_compatibility_metadata(inspected, frozen_onnx=result["format"] == "onnx"))
             result.update({"online_inference_ready": True, "online_block_reason": None,
                 "online_inference_mode": "player_view_compatible_v1", "online_history_policy": "masked_unavailable",
-                "native_online_observation_complete": False, "spectator_evaluation_supported": False,
+                "native_online_observation_complete": False, "spectator_evaluation_supported": True,
                 "training_stage": inspected.get("training_stage")})
         return result
 

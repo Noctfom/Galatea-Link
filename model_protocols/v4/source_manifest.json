@@ -2,10 +2,23 @@
   "source": "Galatea-Core",
   "commit": "1b0fa025994b6eabb8c58dc1ed2090bfbea28d04",
   "model_protocol_version": 4,
-  "schema_revision": 14,
+  "schema_revision": 15,
   "link_online_input_policy": "player_view_compatible_v1",
   "link_online_history_policy": "masked_unavailable",
   "maintenance_sources": [
+    {
+      "commit": "23d6fd0c1d57f38ab6736e7002acf9637f8d0fbf",
+      "purpose": "修订十五当前询问和逐链上下文，原参数完整保留，旧修订十四静态图使用独立输入签名",
+      "source_sha256_utf8": {
+        "core_message_protocol.py": "b4348d3d22b1e71367476654ef753d2581181bea77f5f033d440d1b5a3dd74aa",
+        "data_types.py": "9b3e27cfc609cdebe970f02e671368d55a13df5654b92c45fffe2ec45c48a308",
+        "public_observation.py": "67a03d7931eb94f5d52c0bdab4fa0d52443c15b96c4711ca07c65c48d17ad8c1",
+        "feature_encoder.py": "3e2db1f34555f9c21ba26743312c7fb9fcc270108b42af6ff9051818f655d9a4",
+        "public_context_encoder.py": "2c0a88ebb6c260e1700c4dd34b7399d99486b85e85753f0d7db0bfb553ae440f",
+        "galatea_net.py": "cbbd9d7d79cc187907281541d36237e1362fd379f714a38245ee415f694005c3",
+        "protocol_schema.py": "bf756a2b24850fded76299b1a0ac10ba3455014866617b50a29b5e0360ae4d31"
+      }
+    },
     {
       "commit": "2bd44a170e68c64630c7edcbae7f14eb5da7c4a0",
       "purpose": "只读核对 Type21 基础动作及自定义宏输入，结合客户端排序响应独立接通在线消息和默认顺序出口，不改变模型张量合同",

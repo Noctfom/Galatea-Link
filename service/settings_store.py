@@ -294,6 +294,7 @@ class LinkServiceSettingsStore:
         }
         server_fields = {
             "profile",
+            "role",
             "host",
             "port",
             "protocol_version",
@@ -420,6 +421,7 @@ class LinkServiceSettingsStore:
             "configuration_revision": self._configuration_revision,
             "server": {
                 "profile": self._server.profile,
+                "role": self._server.role,
                 "host": self._server.host,
                 "port": self._server.port,
                 "protocol_version": self._server.protocol_version,

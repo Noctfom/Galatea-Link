@@ -164,5 +164,5 @@ def test_readonly_core_chain_parser_and_v4_inputs_are_already_correct(tmp_path, 
     reference = readonly_core_reference(root, state, rows, player, msg_type=16, payload=payload)
     projection = project_online_snapshot(state.get_snapshot(), player, event_type=16)
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projection, reference, player)
-    assert report["field_count"] == 108
+    assert report["field_count"] == 116
     assert report["all_fields_equal"], report["different_fields"]

@@ -1,7 +1,7 @@
 # V4 在线映射的独立报文夹具与只读 Core 快照参考
 
 import ast
-from copy import copy
+from copy import copy, deepcopy
 import io
 from pathlib import Path
 import struct
@@ -80,7 +80,7 @@ def readonly_core_reference(root, state, rows, player=0, *, msg_type=11, payload
     methods = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in {"get_snapshot", "_parse_valid_actions"}]
     assigns = [node for node in tree.body if isinstance(node, ast.Assign) and any(
         isinstance(target, ast.Name) and target.id in {"_IDLE_COMMAND_OPERATIONS", "_IDLE_COMMAND_SUMMON_METHODS", "_IDLE_COMMAND_LABELS"} for target in node.targets)]
-    namespace = {**vars(d), **vars(constants), "copy": copy, "struct": struct, "io": io, "traceback": traceback,
+    namespace = {**vars(d), **vars(constants), "copy": copy, "deepcopy": deepcopy, "struct": struct, "io": io, "traceback": traceback,
         "card_db": FixtureCardReader(), "validate_transition_history": validate_transition_history}
     if msg_type == 16:
         # 在内存加载参考连锁解析函数，保持不导入 Core 或写入模块缓存
@@ -97,6 +97,7 @@ def readonly_core_reference(root, state, rows, player=0, *, msg_type=11, payload
         p0_initial_deck=list(state._initial_decks[0][0] or ()), p1_initial_deck=list(state._initial_decks[1][0] or ()),
         p0_initial_extra=list(state._initial_decks[0][1] or ()), p1_initial_extra=list(state._initial_decks[1][1] or ()),
         field_map={0: {}, 1: {}}, _reload_counts={}, chain_stack=[], history_stack=[], known_hand_codes={0: [], 1: []},
+        resolving_chain_index=0, recent_chain_targets=[], _snapshot_prompt_context=lambda: (),
         current_valid_actions=[], public_observation=projection.public_context,
         transition_recorder=SimpleNamespace(has_pending_boundary=False, snapshot=lambda: []))
     for actor, zone, index, raw in rows:

@@ -193,7 +193,7 @@ def test_chain_sort_base_inputs_match_readonly_core(tmp_path, player):
     reference = readonly_core_reference(os.environ["GALATEA_CORE_READONLY_ROOT"], state, rows, player, msg_type=21, payload=payload)
     projection = project_online_snapshot(state.get_snapshot(), player, event_type=21)
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projection, reference, player)
-    assert report["field_count"] == 108 and report["all_fields_equal"], report["different_fields"]
+    assert report["field_count"] == 116 and report["all_fields_equal"], report["different_fields"]
 
 
 # 自定义排序按相同独立预期执行原生宏构建，默认顺序是 Link 的独立附加候选
@@ -218,7 +218,7 @@ def test_chain_sort_custom_macro_inputs_match_readonly_core(tmp_path, player):
     state.current_valid_actions = actions
     projection = project_online_snapshot(state.get_snapshot(), player, event_type=21)
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projection, reference, player)
-    assert report["field_count"] == 108 and report["all_fields_equal"], report["different_fields"]
+    assert report["field_count"] == 116 and report["all_fields_equal"], report["different_fields"]
 
 
 # 在线网络入口收到排序后只发起一次正常异步决策，不再触发协议中止

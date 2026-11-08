@@ -9,8 +9,11 @@ from .runtime_context import use_assets
 
 class GalateaEncoder:
     # 为单个模型绑定独立词表语义和静态卡组缓存
-    def __init__(self, assets, *, frozen_card_count=None):
+    def __init__(self, assets, *, frozen_card_count=None, schema_revision=15):
+        if schema_revision not in (14, 15):
+            raise ValueError("V4 编码器不支持该观测修订")
         self.assets = assets
+        self.schema_revision = schema_revision
         self.last_online_report = None
         with use_assets(assets):
             vocabulary = assets.vocabulary if frozen_card_count is None else assets.vocabulary.prefix(frozen_card_count)
@@ -23,7 +26,7 @@ class GalateaEncoder:
         if hasattr(snapshot, "_link_v4_projection"):
             raise ValueError("V4 在线诊断投影尚未验收，不能作为正常推理输入")
         with use_assets(self.assets):
-            arrays = self.encoder.encode(snapshot, player_id)
+            arrays = self.encoder.encode(snapshot, player_id, current_context=self.schema_revision >= 15)
         arrays = {key: np.ascontiguousarray(value) for key, value in arrays.items()}
         if output_format == "numpy":
             return arrays
@@ -45,10 +48,14 @@ class GalateaEncoder:
                 "history_policy": HISTORY_POLICY, "ready": False, "blocking_reasons": [str(error)]}
             raise
         self.last_online_report = prepared.report
+        self.last_online_report["runtime_protocol_schema_revision"] = self.schema_revision
+        self.last_online_report["current_context_supported"] = self.schema_revision >= 15
         if prepared.snapshot is None:
             raise ValueError("V4 在线观测合同缺少可用输入: " + ", ".join(prepared.report["blocking_reasons"]))
         try:
             arrays = self.encode(prepared.snapshot, player_id, output_format="numpy")
+            if prepared.report.get('visibility') == 'spectator_public':
+                arrays['deck_film_mask'].fill(False)
         except (ValueError, TypeError, IndexError) as error:
             self.last_online_report = {**prepared.report, "ready": False,
                 "blocking_reasons": ["encoding_failed"], "error": str(error)}

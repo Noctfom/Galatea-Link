@@ -40,6 +40,7 @@ class ServerConfig:
     game_id: int = 0
     connect_timeout: float = 10.0
     trace_packets: bool = False
+    role: str = "duelist"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ class DecisionConfig:
     core_time_budget: float = 5.0
     core_feedback_enabled: bool = True
     core_feedback_passive_enabled: bool = False
+    core_feedback_spectator_player: int = 0
     llm_time_budget: float = 12.0
     autonomous_intervention_enabled: bool = False
     autonomous_allowed_modes: tuple[str, ...] = (
@@ -220,6 +222,7 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
     net_raw = _as_mapping(model_raw.get("config"), "model.config")
 
     server = ServerConfig(
+        role=str(server_raw.get("role", "duelist")).strip().casefold(),
         profile=str(server_raw.get("profile", "ygopro")),
         host=str(server_raw.get("host", "127.0.0.1")),
         port=_as_int(server_raw.get("port", 7911), "server.port"),
@@ -376,6 +379,7 @@ def build_app_config(raw_config: Mapping[str, Any] | None) -> AppConfig:
         core_time_budget=float(decision_raw.get("core_time_budget", 5.0)),
         core_feedback_enabled=_as_bool(decision_raw.get("core_feedback_enabled", True), "decision.core_feedback_enabled"),
         core_feedback_passive_enabled=_as_bool(decision_raw.get("core_feedback_passive_enabled", False), "decision.core_feedback_passive_enabled"),
+        core_feedback_spectator_player=_as_int(decision_raw.get("core_feedback_spectator_player", 0), "decision.core_feedback_spectator_player"),
         llm_time_budget=float(decision_raw.get("llm_time_budget", 12.0)),
         autonomous_intervention_enabled=_as_bool(
             decision_raw.get("autonomous_intervention_enabled", False),

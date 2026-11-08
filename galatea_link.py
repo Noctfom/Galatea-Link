@@ -93,7 +93,12 @@ class GalateaLink:
         llm_config=None,
         decision_config=None,
         game_chat_config=None,
+        session_role="duelist",
     ):
+        if session_role not in {"duelist", "spectator"}:
+            raise ValueError("入房身份必须为 duelist 或 spectator")
+        self.session_role = session_role
+        self._observer_request_sent = False
         self.client = YgoNetClient(
             host,
             port,
@@ -102,6 +107,7 @@ class GalateaLink:
             game_id=game_id,
             connect_timeout=connect_timeout,
             trace_packets=trace_packets,
+            spectator=session_role == "spectator",
         )
         self.password = password
         self.agent_name = agent_name
@@ -177,10 +183,14 @@ class GalateaLink:
             read_only=True,
         )
 
-        _console_print(f"🃏 正在加载卡组: {deck_name}")
-        self.deck_reference = str(deck_name)
-        self.deck = load_deck(str(LINK_DATA_ROOT / "decks"), deck_name)
-        if self.deck is None:
+        self.deck_reference = "" if self.is_spectator else str(deck_name)
+        self.deck = None
+        if not self.is_spectator:
+            _console_print(f"🃏 正在加载卡组: {deck_name}")
+            self.deck = load_deck(str(LINK_DATA_ROOT / "decks"), deck_name)
+        else:
+            _console_print("👁️ 观众席模式，不加载或上传本地卡组")
+        if self.deck is None and not self.is_spectator:
             raise FileNotFoundError(f"\\n❌ 找不到卡组文件！")
             
         second_hand_keywords = ["后手", "Going Second", "Second Hand", "后攻", "后手位", "后攻位"]
@@ -189,10 +199,11 @@ class GalateaLink:
         _console_print(f"🎲 战术偏好: {'后攻 (Going Second)' if self.prefer_second else '先攻 (Going First)'}")
         
         self.gamestate = DuelState(
-            p0_main=self.deck.main, p0_extra=self.deck.extra,
-            p1_main=[], p1_extra=[],
+            p0_main=self.deck.main if self.deck else None, p0_extra=self.deck.extra if self.deck else None,
+            p1_main=[] if self.deck else None, p1_extra=[] if self.deck else None,
             model_protocol_version=self.ai.model_protocol_version,
             asset_dir=self.model_assets_path,
+            spectator=self.is_spectator,
         )
         if self.ai.model_protocol_version == 4 and self.core_model_loaded:
             bindings = self.ai.encoder.assets.lookup.runtime_effect_bindings
@@ -212,6 +223,7 @@ class GalateaLink:
         self.observation_sequence = 0
         self.latest_observation = None
         self.decision_policy = InterventionPolicy(decision_config or DecisionConfig())
+        self._feedback_reference_player = self.decision_policy.config.core_feedback_spectator_player
         self.model_feedback = ModelFeedbackHistory()
         self._feedback_task = None
         self._feedback_future = None
@@ -221,10 +233,10 @@ class GalateaLink:
         self.llm_config = active_llm_config
         self.llm_client = (
             create_llm_client(active_llm_config)
-            if self.decision_policy.config.agent_backend == "local"
+            if self.decision_policy.config.agent_backend == "local" and not self.is_spectator
             else None
         )
-        if self.llm_client is not None and active_llm_config.cache_static_context:
+        if self.deck is not None and self.llm_client is not None and active_llm_config.cache_static_context:
             self.llm_client.set_static_context(
                 build_llm_static_context(
                     self.deck.main,
@@ -261,11 +273,29 @@ class GalateaLink:
         )
         self.runtime = GalateaRuntimeApi(self, self.event_bus)
 
+    # 请求身份与真实观众座位均只能进入公开观察路径
+    @property
+    def is_spectator(self):
+        return getattr(self, 'session_role', 'duelist') == 'spectator' or getattr(self, 'ai_player_id', None) == 7
+
+    # 服务端临时分配为观众时清空原决斗私有镜像，不沿用本地构筑
+    def _enter_spectator_state(self):
+        self.client.spectator = True
+        self.deck = None
+        self.deck_reference = ""
+        if not self.gamestate.spectator:
+            resolver = self.gamestate.effect_slot_resolver
+            self.gamestate = DuelState(model_protocol_version=self.ai.model_protocol_version,
+                asset_dir=self.model_assets_path, spectator=True)
+            self.gamestate.effect_slot_resolver = resolver
+        self.gamestate.online_projection.spectator_confirmed = True
+        self.ai_core_player_id = None
+
     async def start(self):
         attempted_versions = set()
         try:
             metadata = getattr(getattr(self, "ai", None), "model_metadata", None) or {}
-            if metadata.get("online_inference_ready") is False and self.decision_policy.config.mode != "llm_only":
+            if not self.is_spectator and metadata.get("online_inference_ready") is False and self.decision_policy.config.mode != "llm_only":
                 raise RuntimeError(metadata["online_block_reason"] + "，请暂用 V3 模型或显式选择 llm_only")
             while not self._closed:
                 active_version = int(self.client.protocol_version)
@@ -364,17 +394,19 @@ class GalateaLink:
     async def handle_server_msg(self, msg_type, msg_data):
         try:
             if msg_type == 0x12: # STOC_JOIN_GAME
-                _console_print("✅ 成功加入房间！正在上传卡组...")
+                _console_print("✅ 成功加入房间，等待观众席确认" if self.is_spectator else "✅ 成功加入房间！正在上传卡组...")
                 self.room_duel_mode = msg_data[5] if len(msg_data) >= 6 else 0
                 self.room_ready = {0: False, 1: False, 2: False, 3: False}
                 self._ready_seat = None
                 self._start_requested = False
                 self.last_server_error = None
+                self._observer_request_sent = False
                 self._publish_event(
                     "room.joined",
                     {"duel_mode": self.room_duel_mode},
                 )
-                await self._submit_current_deck()
+                if not self.is_spectator:
+                    await self._submit_current_deck()
                 # 注意：这里先不要发 send_ready()，等服务器下发 0x13 之后再发
 
             elif msg_type == 0x13: # STOC_TYPE_CHANGE
@@ -382,23 +414,30 @@ class GalateaLink:
                     player_id, is_host = parse_type_change(msg_data)
                     previous_player_id = self.ai_player_id
                     self._assign_ai_player(player_id)
+                    if player_id == 7:
+                        self._enter_spectator_state()
                     self.is_room_host = is_host
                     if previous_player_id != player_id:
                         self._ready_seat = None
                     _console_print(
                         f"🪑 服务器分配座位: Player {self.ai_player_id} "
-                        f"({'房主' if self.is_room_host else '参与者'})"
+                        f"({'观众席' if player_id == 7 else '等待切换观众席' if self.is_spectator else '房主' if self.is_room_host else '参与者'})"
                     )
                     self._publish_event(
                         "room.role.updated",
                         {
                             "player_id": player_id,
                             "is_host": is_host,
+                            "role": "spectator" if player_id == 7 else "spectator_pending" if self.is_spectator else "duelist",
                         },
                     )
 
                 # 拿到决斗座位后发送准备信号并等待房主启动
-                if self.ai_player_id in (0, 1, 2, 3) and self._ready_seat != self.ai_player_id:
+                if self.is_spectator and self.ai_player_id != 7 and not self._observer_request_sent:
+                    self._observer_request_sent = True
+                    await self.client.send_to_observer()
+                    self._publish_event("room.spectator.requested")
+                if not self.is_spectator and self.ai_player_id in (0, 1, 2, 3) and self._ready_seat != self.ai_player_id:
                     await self.client.send_ready()
                     self._ready_seat = self.ai_player_id
                     self._publish_event(
@@ -553,10 +592,14 @@ class GalateaLink:
                     )
 
             elif msg_type == STOC_SELECT_HAND and len(msg_data) == 0:
+                if self.is_spectator:
+                    return
                 import random
                 await self.client.send_packet(0x03, bytes([random.choice([1, 2, 3])]))
 
             elif is_select_tp_request(msg_type, msg_data):
+                if self.is_spectator:
+                    return
                 _console_print(f"👑 猜拳获胜！AI 按偏好选择: {'后攻' if self.prefer_second else '先攻'}...")
                 tp_choice = build_tp_result(self.prefer_second)
                 await self.client.send_packet(0x04, bytes([tp_choice]))
@@ -605,13 +648,19 @@ class GalateaLink:
                         self._capture_duel_result(ocg_payload)
 
                     if ocg_type == 4:
+                        if ocg_payload and ocg_payload[0] in (0x10, 0x11):
+                            self._assign_ai_player(7)
+                            self._enter_spectator_state()
                         duel_player_id = parse_duel_player_id(ocg_payload)
-                        if duel_player_id is not None:
+                        if duel_player_id is not None and not self.is_spectator:
                             self._assign_ai_core_player(
                                 duel_player_id,
                                 source="msg_start",
                             )
                     
+                    if self.is_spectator and ocg_type in INTERACTION_MESSAGE_TYPES | {1}:
+                        self.gamestate.update(ocg_type, ocg_payload)
+                        continue
                     # === 修复 1：完美处理 RETRY 死锁 ===
                     if ocg_type == 1:
                         self.gamestate.update(ocg_type, ocg_payload)
@@ -648,6 +697,9 @@ class GalateaLink:
                     if ocg_type == 162 and self.gamestate.online_projection.started:
                         await self._invalidate_rebuilt_prompt()
                     self.gamestate.update(ocg_type, ocg_payload)
+                    if self.is_spectator and self.gamestate.online_projection.started and not self.duel_active:
+                        self.duel_active = True
+                        self._publish_event("duel.started", {"role": "spectator", "source": self.gamestate.online_projection.start_source})
                     if (
                         ocg_type in INTERACTION_MESSAGE_TYPES
                         and self.ai_player_id in (0, 1)
@@ -770,6 +822,8 @@ class GalateaLink:
 
     # 异步构建普通或复杂宏动作提示快照
     async def _prepare_prompt_snapshot(self, msg_type, msg_payload):
+        if self.is_spectator:
+            return self.gamestate.get_snapshot()
         if (
             msg_type not in MACRO_ACTION_MSGS
             or self.ai_player_id not in (0, 1)
@@ -925,6 +979,13 @@ class GalateaLink:
     # 外部开关立即停止新增采样，不改变 Core 或 LLM 的决策模式
     def _feedback_controls_changed(self):
         config = self.decision_policy.config
+        reference = config.core_feedback_spectator_player
+        if self.is_spectator and getattr(self, '_feedback_reference_player', reference) != reference:
+            self._cancel_feedback()
+            self.model_feedback.reset()
+            self._feedback_reference_player = reference
+            if self.gamestate.online_projection.started:
+                self._capture_llm_observation(None, self.gamestate.get_snapshot())
         if not config.core_feedback_enabled or not config.core_feedback_passive_enabled:
             self._cancel_feedback()
 
@@ -939,6 +1000,10 @@ class GalateaLink:
         report['model_available'] = bool(getattr(self.ai, 'model_available', False))
         report['model_protocol_version'] = getattr(self.ai, 'model_protocol_version', None)
         report['passive_busy'] = self._feedback_busy()
+        report['role'] = 'spectator' if self.is_spectator else 'duelist'
+        report['reference_player'] = config.core_feedback_spectator_player if self.is_spectator else getattr(self, 'ai_core_player_id', None)
+        report['spectator_confirmed'] = projection.spectator_confirmed
+        report['spectator_evaluation_supported'] = getattr(self.ai, 'model_protocol_version', None) == 4
         return report
 
     # 只在请求仍有效时发布反馈，不保存输入卡片或替另一个玩家生成预测
@@ -957,23 +1022,26 @@ class GalateaLink:
         if point is not None:
             self._publish_event('model.feedback.updated', {'point': point})
 
-    # 合并连续公开刷新，只给已绑定的实际决斗者调度独立场面评测
+    # 合并连续刷新，为实际玩家视角或已确认观众公开场面调度评测
     def _schedule_feedback(self, snapshot, event_type):
         history = getattr(self, 'model_feedback', None)
         if history is None:
             return
         coverage = getattr(snapshot, 'online_coverage', {})
-        if event_type == 4 and coverage.get('sequence') == 1:
+        if event_type in (4, 162) and coverage.get('sequence') == 1:
             history.reset()
         config = self.decision_policy.config
         if not (config.core_feedback_enabled and config.core_feedback_passive_enabled
                 and getattr(self.ai, 'model_protocol_version', None) == 4
                 and not getattr(self, '_core_circuit_breaker_reason', None)
                 and self.ai.model_available and coverage.get('started')
-                and getattr(self, 'ai_player_id', None) in (0, 1)):
+                and (getattr(self, 'ai_player_id', None) in (0, 1) and not self.is_spectator
+                    or self.is_spectator and coverage.get('visibility') == 'spectator_public' and coverage.get('spectator_confirmed'))):
             return
-        if event_type in INTERACTION_MESSAGE_TYPES and self.decision_policy.should_run_core():
+        if not self.is_spectator and event_type in INTERACTION_MESSAGE_TYPES and self.decision_policy.should_run_core():
             return
+        if self.is_spectator:
+            snapshot.online_coverage['evaluation_perspective'] = config.core_feedback_spectator_player
         self._feedback_pending = snapshot
         if getattr(self, '_feedback_task', None) is None or self._feedback_task.done():
             self._feedback_task = asyncio.create_task(self._run_feedback())
@@ -994,7 +1062,8 @@ class GalateaLink:
                 if coordinator is not None and coordinator.active_request_id is not None and self.decision_policy.should_run_core():
                     continue
                 snapshot, self._feedback_pending = self._feedback_pending, None
-                perspective = snapshot.online_coverage['perspective']
+                spectator = snapshot.online_coverage.get('visibility') == 'spectator_public'
+                perspective = snapshot.online_coverage['evaluation_perspective'] if spectator else snapshot.online_coverage['perspective']
                 future = loop.run_in_executor(self.policy_executor,
                     functools.partial(self.ai.get_state_evaluation_from_snapshot, snapshot, perspective))
                 self._feedback_future = future
@@ -1010,7 +1079,7 @@ class GalateaLink:
                     history.last_error = '旁路评测超时，已停止等待'
                     return
                 if history.epoch == epoch and snapshot.online_coverage['sequence'] == self.gamestate.online_projection.sequence:
-                    self._record_model_feedback(evaluation, snapshot, source='passive')
+                    self._record_model_feedback(evaluation, snapshot, source='spectator' if spectator else 'passive')
         except asyncio.CancelledError:
             return
         except Exception:
@@ -1025,7 +1094,7 @@ class GalateaLink:
             event_type=event_type,
         )
         observation["observation_id"] = self.observation_sequence
-        observation["own_deck_identity"] = {
+        observation["own_deck_identity"] = ({
             "deck_ref": getattr(self.deck, "reference", self.deck.name),
             "display_name": self.deck.name,
             "source": copy.deepcopy(
@@ -1035,7 +1104,7 @@ class GalateaLink:
                     {"kind": "link_local", "label": "Link 本地卡组"},
                 )
             ),
-        }
+        } if self.deck is not None else None)
         self.latest_observation = observation
         self._schedule_feedback(snapshot, event_type)
         self._update_v4_diagnostics(snapshot, event_type)
@@ -1095,7 +1164,8 @@ class GalateaLink:
             changes, released = self._branch_retry.enter(snapshot, msg_type, raw_msg[1:],
                 hard_bans=hard, engine_retry=engine_retry)
             if changes:
-                _console_print(f"🔁 [Core 闭环回退] 同局面累计 {threshold} 次，优先尝试末端其他候选")
+                targets = ' → '.join(f"Type {item['message_type']} 选项 [{item['choice_id']}]" for item in changes)
+                _console_print(f"🔁 [Core 闭环回退] 同局面累计 {threshold} 次，优先尝试末端其他候选；软避让 {targets}")
                 self._publish_event("core.loop.adjusted", {"policy": LOOP_POLICY, "changes": changes})
             if released:
                 self._publish_event("core.loop.released", {"message_type": msg_type, "hard_bans_preserved": True})
@@ -1116,6 +1186,8 @@ class GalateaLink:
 
     # 返回玩家视角并让观战或未分配状态安全回退
     def _perspective_player_id(self):
+        if self.is_spectator:
+            return self.decision_policy.config.core_feedback_spectator_player
         core_player_id = getattr(self, "ai_core_player_id", None)
         return core_player_id if core_player_id in (0, 1) else 0
 
@@ -1129,6 +1201,8 @@ class GalateaLink:
 
     # 同步对局内 Core 玩家编号并映射己方卡组
     def _assign_ai_core_player(self, player_id, *, source):
+        if self.is_spectator:
+            return
         if player_id not in (0, 1):
             raise ValueError(f"Core 玩家编号非法: {player_id}")
         previous_player_id = getattr(self, "ai_core_player_id", None)
@@ -1163,6 +1237,9 @@ class GalateaLink:
     # 返回不含完整卡片列表的当前卡组提交快照
     def _deck_snapshot(self):
         deck = self.deck
+        if deck is None:
+            return {"loaded": False, "deck_ref": None, "display_name": "观众席，无对战卡组",
+                "source": {"kind": "spectator"}, "counts": {"main": 0, "extra": 0, "side": 0}}
         return {
             "deck_ref": getattr(
                 self,
@@ -1180,6 +1257,8 @@ class GalateaLink:
 
     # 使用 YGOPro 主额外合并区与备牌区格式提交当前卡组
     async def _submit_current_deck(self, *, retry_ready=False):
+        if self.is_spectator:
+            raise RuntimeError("观众会话不上传卡组")
         snapshot = self._deck_snapshot()
         await self.client.send_deck(
             self.deck.main,
@@ -1203,6 +1282,8 @@ class GalateaLink:
 
     # 从会话卡组文件重新加载并在大厅中重新上传准备
     async def reload_deck_from_storage(self):
+        if self.is_spectator:
+            raise RuntimeError("观众会话没有当前对战卡组")
         if self.duel_active:
             raise RuntimeError("决斗进行中不能重新加载卡组")
         deck = load_deck(
@@ -1249,7 +1330,7 @@ class GalateaLink:
 
     # 在全部决斗者准备后由房主自动请求开始
     async def _start_duel_if_host_ready(self):
-        if not getattr(self, "is_room_host", False) or self.duel_active:
+        if self.is_spectator or not getattr(self, "is_room_host", False) or self.duel_active:
             return
         required_players = (0, 1, 2, 3) if self.room_duel_mode == 2 else (0, 1)
         if self._start_requested or not all(
@@ -1295,6 +1376,9 @@ class GalateaLink:
             "reason": describe_win_reason(reason),
             "termination": "connection_lost" if reason == 0x04 else "engine_result",
         }
+        if self.is_spectator:
+            result.update(role="spectator", outcome="draw" if winner == 2 else "observed_win",
+                winner_role="draw" if winner == 2 else f"player_{winner}")
         self._pending_duel_result = result
         self.last_duel_result = copy.deepcopy(result)
         self._publish_event("duel.result", copy.deepcopy(result))
@@ -1315,7 +1399,7 @@ class GalateaLink:
             reason_names = {
                 "connection_lost": "连接中断",
                 "link_stopped": "Link 会话被主动停止",
-                "protocol_error": "在线消息解析或玩家视角校验失败，已停止连接",
+                "protocol_error": "在线消息或状态处理失败，已停止连接",
                 "server_leave": "玩家离开或房间关闭",
                 "server_duel_end": "服务端结束对局但未收到胜负消息",
             }
@@ -1350,8 +1434,8 @@ class GalateaLink:
         self.ai_core_player_id = None
         self.time_player = None
         self.time_left = {0: None, 1: None}
-        self.gamestate.p0_deck = list(self.deck.main)
-        self.gamestate.p0_extra = list(self.deck.extra)
+        self.gamestate.p0_deck = list(self.deck.main) if self.deck else []
+        self.gamestate.p0_extra = list(self.deck.extra) if self.deck else []
         self.gamestate.p1_deck = []
         self.gamestate.p1_extra = []
         self.ignore_actions_blacklist = []
@@ -1571,6 +1655,8 @@ class GalateaLink:
 
     # 提交仍然有效的决策结果并清理当前动作池
     async def _commit_decision(self, request: DecisionRequest, decision):
+        if self.is_spectator:
+            raise RuntimeError("观众会话不能提交决斗决策")
         outcome = decision
         if not isinstance(outcome, DecisionOutcome):
             outcome = DecisionOutcome(response=decision, source="unknown")
@@ -1612,6 +1698,11 @@ class GalateaLink:
                 prompt_type=request.msg_type, turn=request.snapshot.global_data.turn_count,
                 phase=request.snapshot.global_data.phase_id, action=action, choice_id=choice_id,
                 digest=self.gamestate.history_digest())
+        prompt_response = None
+        note_prompt = getattr(getattr(self, "gamestate", None), "_note_prompt_response", None)
+        if callable(note_prompt):
+            action, _ = self._match_submitted_action(request, outcome)
+            prompt_response = note_prompt(request.snapshot.global_data.to_play, request.msg_type, response, action)
         try:
             sent = await self.client.send_decision(response)
             if sent is False:
@@ -1623,6 +1714,8 @@ class GalateaLink:
                 else:
                     tracker.abort(token, "transport_confirmation_unavailable")
         except BaseException:
+            if prompt_response is not None and getattr(self.gamestate, "_prompt_response", None) is prompt_response:
+                self.gamestate._prompt_response = None
             if branch is not None:
                 branch.abort(branch_token)
             if tracker is not None and token is not None:
@@ -1728,6 +1821,7 @@ def create_link_from_config(config: AppConfig) -> GalateaLink:
         game_id=config.server.game_id,
         connect_timeout=config.server.connect_timeout,
         trace_packets=config.server.trace_packets,
+        session_role=config.server.role,
         agent_name=config.agent.name,
         prefer_second=config.agent.prefer_second,
         model_device=config.model.device,

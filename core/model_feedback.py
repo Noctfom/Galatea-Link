@@ -4,6 +4,7 @@ from collections import deque
 from copy import deepcopy
 import math
 import time
+import uuid
 
 import numpy as np
 
@@ -40,6 +41,8 @@ class ModelFeedbackHistory:
         self.points = deque(maxlen=128)
         self.epoch = 0
         self.last_error = None
+        self.total_samples = 0
+        self.series_id = uuid.uuid4().hex
 
     # 重置单局或重建边界，已经启动的旧任务通过代次检查失效
     def reset(self, *, clear=True):
@@ -47,20 +50,27 @@ class ModelFeedbackHistory:
         self.last_error = None
         if clear:
             self.points.clear()
+            self.total_samples = 0
+            self.series_id = uuid.uuid4().hex
 
     # 记录带来源与视角的真实预测，同一状态优先保留决策共用采样
     def record(self, evaluation, snapshot, model, *, source, request_id=None):
         coverage = getattr(snapshot, 'online_coverage', {})
         point = {**deepcopy(evaluation), 'sampled_at': time.time(), 'source': source,
             'request_id': request_id, 'state_sequence': coverage.get('sequence'),
-            'perspective': coverage.get('perspective', snapshot.global_data.to_play),
+            'perspective': coverage.get('evaluation_perspective', coverage.get('perspective', snapshot.global_data.to_play)),
+            'visibility': coverage.get('visibility', 'player_view'),
+            'turn_count_origin': coverage.get('turn_count_origin', 'from_start'),
             'turn': snapshot.global_data.turn_count, 'phase_id': snapshot.global_data.phase_id,
             'model': {key: model.get(key) for key in ('model_id', 'iteration', 'model_protocol_version', 'inference_backend')},
             'history_policy': 'masked_unavailable', 'native_observation_complete': False}
         if self.points and self.points[-1]['state_sequence'] == point['state_sequence']:
             if source == 'passive' and self.points[-1]['source'] == 'decision_shared':
                 return None
-            self.points.pop()
+            point['sample_id'] = self.points.pop()['sample_id']
+        else:
+            self.total_samples += 1
+            point['sample_id'] = self.total_samples
         self.points.append(point)
         self.last_error = None
         return deepcopy(point)
@@ -73,5 +83,8 @@ class ModelFeedbackHistory:
             'passive_enabled': passive_enabled, 'available': latest is not None,
             'scope': 'current_duel' if active else 'last_duel',
             'current': bool(active and latest and latest['state_sequence'] == state_sequence),
-            'latest': latest, 'history': points, 'capacity': 128, 'last_error': self.last_error,
-            'limitations': ['player_visible_only', 'uncalibrated_predictions', 'transition_history_masked']}
+            'latest': latest, 'history': points, 'capacity': 128, 'total_samples': self.total_samples,
+            'series_id': self.series_id, 'last_error': self.last_error,
+            'limitations': (['spectator_public_only', 'both_hands_unknown', 'initial_decks_unknown']
+                if latest and latest.get('visibility') == 'spectator_public' else ['player_visible_only'])
+                + ['uncalibrated_predictions', 'transition_history_masked']}

@@ -73,7 +73,7 @@ from .semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 14
+PROTOCOL_SCHEMA_REVISION = 15
 
 
 # 生成当前 V4 开发阶段实际启用的模型协议描述
@@ -106,6 +106,7 @@ def _schema_descriptor(card_vocabulary):
                 "hint_semantic_card_idx",
                 "known_deck_idx",
                 "event_public_code",
+                "current_context_code",
             ],
         },
         "global_state": {
@@ -447,7 +448,42 @@ def _schema_descriptor(card_vocabulary):
     }
 
 
-# 返回检查点、ONNX 和部署包共用的 V4 协议身份
+# 统一计算当前或已知旧版的结构摘要，不涉及模型文件改写
+def _protocol_descriptor_hash(descriptor):
+    encoded = json.dumps(descriptor, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# 精确恢复修订十四的字段合同，保留冻结旧图的可用路径
+def _revision_14_schema_hash(card_vocabulary):
+    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor["schema_revision"] = 14
+    public = dict(descriptor["public_observation"])
+    public.pop("current_context", None)
+    public["inputs"] = {key: value for key, value in public["inputs"].items()
+                        if not key.startswith("current_context_")}
+    descriptor["public_observation"] = public
+    descriptor["card_identity"]["indexed_inputs"].remove("current_context_code")
+    return _protocol_descriptor_hash(descriptor)
+
+
+# 只识别已经核对过的旧观测扩展，未知结构仍由模型加载器区分
+def observation_protocol_update(container, *, card_vocabulary=None):
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    if (container.get("model_protocol_version") != MODEL_PROTOCOL_VERSION
+            or container.get("protocol_schema_revision") != 14
+            or container.get("protocol_schema_hash") != _revision_14_schema_hash(vocabulary)):
+        return None
+    return {"source_protocol_schema_revision": 14,
+        "source_protocol_schema_hash": container["protocol_schema_hash"],
+        "runtime_protocol_schema_revision": PROTOCOL_SCHEMA_REVISION,
+        "runtime_protocol_schema_hash": _protocol_descriptor_hash(_schema_descriptor(vocabulary)),
+        "status": "current_context_input_extension", "weights_preserved": True,
+        "message": "保留全部已有权重并补充当前询问与连锁观测，原文件保持不变"}
+
+
+# 返回当前运行时的词表语义和观测结构身份
 def get_current_protocol_metadata(card_vocabulary=None, *, semantic_root="."):
     """返回检查点、ONNX 和部署包共用的 V4 协议身份"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
@@ -499,6 +535,7 @@ def apply_current_protocol_metadata(
             label="network config",
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
+            allow_observation_updates=True,
         )
     normalized.update(metadata)
     vocab_size = normalized.get("vocab_size", metadata["card_vocab_size"])
@@ -517,6 +554,7 @@ def validate_protocol_metadata(
     label="artifact",
     card_vocabulary=None,
     semantic_root=".",
+    allow_observation_updates=False,
 ):
     """校验结构一致且词表是当前只追加前缀的产物"""
     if not isinstance(container, dict):
@@ -526,6 +564,7 @@ def validate_protocol_metadata(
         vocabulary,
         semantic_root=semantic_root,
     )
+    observation_update = observation_protocol_update(container, card_vocabulary=vocabulary)
     for key in (
         "model_protocol_version",
         "protocol_schema_revision",
@@ -533,6 +572,8 @@ def validate_protocol_metadata(
         "card_vocab_size",
         "semantic_lookup_format_version",
     ):
+        if allow_observation_updates and observation_update and key in ("protocol_schema_revision", "protocol_schema_hash"):
+            continue
         expected_value = expected[key]
         if container.get(key) != expected_value:
             raise ValueError(

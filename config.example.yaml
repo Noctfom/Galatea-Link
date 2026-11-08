@@ -1,6 +1,8 @@
 # Galatea Link 可公开提交的配置模板
 server:
   profile: "ygopro"
+  # duelist 参与对局，spectator 请求观众席且不加载上传卡组
+  role: "duelist"
   host: "127.0.0.1"
   port: 7911
   password: ""
@@ -29,7 +31,7 @@ model:
   device: "cpu"
   weights_path: "./models/galatea_model.onnx"
   expected_model_id: ""
-  # V3 在线稳定，V4 当前仅开放资产导入和完整快照离线推理
+  # V3 在线兼容，V4 支持玩家可见推理及观众公开场面评测
   protocol: "auto"
   inference_backend: "auto"
   onnx_providers: ["CPUExecutionProvider"]
@@ -74,6 +76,8 @@ decision:
   # 共用正常决策推理的反馈，持续旁路采样另外开启
   core_feedback_enabled: true
   core_feedback_passive_enabled: false
+  # 观众席采用哪个 Core 玩家作为评测参照，仅允许 0 或 1
+  core_feedback_spectator_player: 0
   llm_time_budget: 12.0
   autonomous_intervention_enabled: false
   autonomous_allowed_modes: ["core_only", "hybrid", "llm_review", "llm_only"]

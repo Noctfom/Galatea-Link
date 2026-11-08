@@ -21,6 +21,12 @@ class CompatibleOnlineInput:
 
 # 根据实际对局快照构造兼容输入，不要求在线消息重现 Core 双方决策边界
 def prepare_online_input(source, player, *, state_evaluation=False):
+    spectator = getattr(source, 'online_coverage', {}).get('visibility') == 'spectator_public'
+    if spectator:
+        if not state_evaluation or not source.online_coverage.get('spectator_confirmed'):
+            raise ValueError('观众公开输入仅支持已确认席位的独立状态评测')
+        from core.spectator_view import public_spectator_snapshot
+        source = public_spectator_snapshot(source)
     if state_evaluation:
         # 状态评测只使用场面，清空菜单而不虚构可行动作
         source = deepcopy(source)
@@ -28,7 +34,7 @@ def prepare_online_input(source, player, *, state_evaluation=False):
         source.action_prompt_type = None
     projection = project_online_snapshot(source, player, history_projection=([], 0))
     native_report = projection.report
-    report = {"schema_version": "galatea.v4_online_input.v1", "mode": ONLINE_MODE,
+    report = {"schema_version": "galatea.v4_online_input.v1", "mode": 'spectator_public_compatible_v1' if spectator else ONLINE_MODE,
         "history_policy": HISTORY_POLICY, "perspective": player,
         "sequence": native_report.get("sequence"), "ready": False,
         "native_observation_complete": False, "behavior_clone_eligible": False,
@@ -75,6 +81,9 @@ def prepare_online_input(source, player, *, state_evaluation=False):
     target.transition_history = []
     target.known_hand_codes = deepcopy(getattr(source, "known_hand_codes", {0: [], 1: []}))
     delattr(target, "_link_v4_projection")
-    target._link_v4_online_input = {"mode": ONLINE_MODE, "history_policy": HISTORY_POLICY}
+    target._link_v4_online_input = {"mode": report['mode'], "history_policy": HISTORY_POLICY}
     report["ready"] = True
+    if spectator:
+        report['visibility'] = 'spectator_public'
+        report['warnings'].extend(('both_hands_unknown', 'initial_decks_unknown', 'spectator_prediction_uncalibrated'))
     return CompatibleOnlineInput(target, deepcopy(report))

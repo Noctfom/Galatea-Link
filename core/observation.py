@@ -112,7 +112,13 @@ class LlmObservationBuilder:
         if player_id not in (0, 1):
             raise ValueError("玩家编号必须是 0 或 1")
         coverage = getattr(snapshot, "online_coverage", {})
-        if coverage.get("started") and coverage.get("perspective") != player_id:
+        public_view = coverage.get('visibility') == 'spectator_public'
+        if public_view:
+            from core.spectator_view import public_spectator_snapshot
+            if coverage.get('started') and not coverage.get('spectator_confirmed'):
+                raise ValueError('观众公开观察尚未取得服务器确认')
+            snapshot = public_spectator_snapshot(snapshot)
+        if not public_view and coverage.get("started") and coverage.get("perspective") != player_id:
             raise ValueError("在线观察只能使用实际接收消息的玩家视角")
 
         catalog: dict[int, dict[str, Any]] = {}
@@ -133,7 +139,9 @@ class LlmObservationBuilder:
                 player_id,
                 index_to_entity_id,
                 catalog,
-                restrict_identity=grave_blocked and entity.location == Zone.GRAVE,
+                restrict_identity=(grave_blocked and entity.location == Zone.GRAVE) or
+                    (public_view and (entity.location in (Zone.HAND, Zone.DECK) or
+                        entity.location in (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA) and not entity.position & 5)),
             )
             cards.append(card)
             if card.get("code"):
@@ -179,7 +187,7 @@ class LlmObservationBuilder:
             shared = getattr(snapshot, "selection_context", None)
             selection_context = dict(shared) if shared else self._build_selection_context(snapshot.valid_actions, prompt_type)
 
-        return {
+        observation = {
             "schema_version": SCHEMA_VERSION,
             "information_quality": {
                 "chain_notifications": {"observed": bool(chain_progress.get("observed")),
@@ -229,6 +237,17 @@ class LlmObservationBuilder:
             "legal_actions": legal_actions,
             "card_catalog": [catalog[code] for code in sorted(catalog)],
         }
+        if public_view:
+            observation['perspective'].update(role='spectator', player_id=None, opponent_player_id=None,
+                reference_player_id=player_id, reference_semantics='self/opponent仅为展示参照，不代表拥有该玩家私有信息')
+            observation['information_quality']['scope'] = 'spectator_public_state'
+            observation['information_quality']['limitations'].extend(('双方手牌与初始构筑未知', '观众不会取得或提交合法动作菜单'))
+            if coverage.get('turn_count_origin') == 'observed_since_join':
+                observation['information_quality']['limitations'].append('中途加入只能统计加入后收到的回合切换，真实绝对回合数未知')
+            observation['decision_required'] = False
+            observation['legal_actions'] = []
+            observation['turn']['actor'] = None
+        return observation
 
     # 输出有界的服务器提示与合法记牌，不根据提示推断隐藏身份或效果有效性
     def _build_public_context(self, snapshot, player_id, catalog):
@@ -287,12 +306,29 @@ class LlmObservationBuilder:
                 identity = self._register_card(event["code"], catalog)
                 item.update(code=identity["code"], card_name=identity["name"])
             notifications.append(item)
+        prompt_facts = []
+        for hint in getattr(snapshot, "prompt_context", ()):
+            if not hint.get("visibility_mask", 0) & (1 << player_id):
+                continue
+            item = {key: hint.get(key, 0) for key in ("kind", "subtype", "value", "chain", "prompt_type")}
+            wire = hint.get("wire_player", -1)
+            item["wire_player"] = self._relative_player(wire, player_id) if wire in (0, 1) else None
+            if hint.get("code"):
+                identity = self._register_card(self._pure_code(hint["code"]), catalog)
+                item.update(code=identity["code"], card_name=identity["name"])
+            prompt_facts.append(item)
+        recent_targets = getattr(snapshot, "recent_chain_targets", ())
         return {"schema_version": "galatea.llm_public_context.v1", "source": "link_online_messages",
             "hints": hints[:128], "hints_truncated": len(hints) > 128,
             "known_deck_positions": known_cards[:512], "recent_notifications": notifications[-16:],
             "deck_reversed": bool(flags[2]) if len(flags) >= 3 and flags[1] else None,
             "tracked_hint_lifecycle_consistent": bool(flags[0]) if flags else None,
             "grave_access_restricted": bool(flags[3 + player_id]) if len(flags) >= 5 else False,
+            "prompt_notifications": prompt_facts[:256], "prompt_notifications_truncated": len(prompt_facts) > 256,
+            "resolving_chain_number": getattr(snapshot, "resolving_chain_index", 0) or None,
+            "recent_indicated_cards": [self._build_indicated_object(item, player_id, catalog) for item in recent_targets[:256]],
+            "indicated_cards_truncated": len(recent_targets) > 256,
+            "current_context_interpretation": "提示保留原始子类型与投递字段，选择参数不一定是用途编号；公开指示不等于规则取对象关系",
             "hint_interpretation": "仅为服务器提示事实，不代表对应效果一定生效或仍在适用"}
 
     # 将观察转换为稳定可读的 JSON 文本
@@ -575,6 +611,26 @@ class LlmObservationBuilder:
             )
         return result
 
+    # 分开展示公告位置与可追踪当前位置，失联不绑定旧槽位的新卡
+    def _build_indicated_object(self, target, player_id, catalog):
+        from game_constants import LocationInfo
+        # 只将结构化位置转换为玩家相对角色，不推测隐藏身份
+        def location(raw):
+            if raw is None or raw < 0:
+                return None
+            owner, zone, sequence, position = LocationInfo.decode(raw)
+            return {"player": self._relative_player(owner, player_id) if owner in (0, 1) else None,
+                "location_id": zone, "location_name": Zone.get_str(zone), "sequence": sequence,
+                "position": position}
+        result = {"announcement_location": location(target.get("announcement_location", -1)),
+            "tracked": bool(target.get("tracked")),
+            "current_location": location(target.get("current_location", -1)) if target.get("tracked") else None}
+        if target.get("visibility_mask", 0) & (1 << player_id) and target.get("code"):
+            code = self._pure_code(target["code"])
+            identity = self._register_card(code, catalog)
+            result.update(code=code, name=identity["name"])
+        return result
+
     # 构建公开连锁与历史事件
     def _build_public_event(
         self,
@@ -596,6 +652,16 @@ class LlmObservationBuilder:
             result["sequence"] = item["s"]
         if item.get("desc"):
             result["description_id"] = item["desc"]
+        if "ct" in item:
+            result["chain_number"] = item["ct"]
+        if "status_known" in item:
+            known = bool(item["status_known"])
+            result["status_known"] = known
+            for key in ("confirmed", "solving", "solved", "activation_negated", "effect_disabled"):
+                result[key] = bool(item.get(key)) if known else None
+            result["indicated_cards_known"] = bool(item.get("targets_known"))
+            result["indicated_cards"] = [self._build_indicated_object(target, player_id, catalog) for target in item.get("targets", ())[:256]]
+            result["indicated_cards_truncated"] = len(item.get("targets", ())) > 256
         if "stage" in item:
             result.update({"chain_number": item["ct"], "stage": item["stage"],
                 "chain_ended": item["chain_ended"], "resolution_observed": item["resolution_observed"],

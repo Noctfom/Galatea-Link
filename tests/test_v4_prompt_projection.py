@@ -132,7 +132,7 @@ def test_prompt_inputs_match_readonly_core_or_report_upstream_issue(tmp_path, ki
         assert actual == [0x01020304] * 2
     projection = project_online_snapshot(state.get_snapshot(), player, event_type=kind)
     report = GalateaEncoder(write_v4_assets(tmp_path / "assets")).audit_projection(projection, reference, player)
-    assert report["field_count"] == 108
+    assert report["field_count"] == 116
     assert report["all_fields_equal"], report["different_fields"]
     assert not report["grants_inference_permission"]
 
